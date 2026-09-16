@@ -19,6 +19,10 @@ def _read_profile(path):
     return frame if len(frame) else None
 
 
+def _sum_available(values):
+    return values.sum(min_count=1)
+
+
 def make_report(folder):
     folder = Path(folder)
     timings = pd.read_csv(folder / "timings.csv")
@@ -128,15 +132,16 @@ def make_report(folder):
             **{column: (column, "sum") for column in stage_columns},
             effective_exact_token_pair_ratio=("effective_exact_token_pair_ratio", "mean"),
             legacy_block_density=("legacy_block_density", "mean"),
-            exact_physical_qk_tiles=("exact_physical_qk_tiles", "sum"),
+            exact_physical_qk_tiles=("exact_physical_qk_tiles", _sum_available),
             mean_proxy_entries=("mean_proxy_entries", "sum"),
             selector_proxy_entries=("selector_proxy_entries", "sum"),
             mean_executed_logit_entries=("mean_executed_logit_entries", "sum"),
             mean_executed_value_entries=("mean_executed_value_entries", "sum"),
             selector_executed_dot_entries=("selector_executed_dot_entries", "sum"),
-            selector_physical_qk_tiles=("selector_physical_qk_tiles", "sum"),
+            selector_physical_qk_tiles=("selector_physical_qk_tiles", _sum_available),
         ).reset_index()
         profile_summary = profile_sample.groupby(GROUP, dropna=False).agg(
+            profile_samples=("sample_id", "nunique"),
             **{column: (column, "median") for column in stage_columns},
             effective_exact_token_pair_ratio=("effective_exact_token_pair_ratio", "mean"),
             legacy_block_density=("legacy_block_density", "mean"),
@@ -208,6 +213,67 @@ def make_report(folder):
             f"{row.score:.2f} | {delta} | {row.prefill_ms:.1f} | {speedup} | "
             f"{row.peak_allocated_gib:.2f} | {exact_ratio} | {mean_name} | {mean_speedup} |"
         )
+
+    if profile is not None:
+        lines += [
+            "",
+            "## 独立 profile：阶段耗时",
+            "",
+            "以下时间来自不进入主计时的额外前向。每个已 profile 样本先跨层求和，再在同一任务、长度和配置内取中位数；`Attention` 还包含布局转换及统计等未单列开销，不能把各阶段时间当作完整模型 prefill 时间。",
+            "",
+            "| Task | Length | Config | n | Descriptor ms | Selector ms | Indices ms | Exact ms | Mean ms | Merge ms | Attention ms |",
+            "| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+        for row in summary.itertuples():
+            profile_samples = getattr(row, "profile_samples", np.nan)
+            if pd.isna(profile_samples):
+                continue
+            stage_values = [
+                getattr(row, column)
+                for column in (
+                    "descriptor_ms", "selector_ms", "indices_ms", "exact_ms",
+                    "mean_ms", "merge_ms", "attention_ms",
+                )
+            ]
+            formatted = ["—" if pd.isna(value) else f"{value:.2f}" for value in stage_values]
+            lines.append(
+                f"| {row.task} | {row.length_label} | {row.config_id} | {int(profile_samples)} | "
+                + " | ".join(formatted)
+                + " |"
+            )
+
+        lines += [
+            "",
+            "## 独立 profile：执行量",
+            "",
+            "计数均为单次完整模型 prefill 的跨层合计。Proxy logical entries 表示有用块条目；executed entries 表示当前 dense PyTorch proxy 实际计算的条目。",
+            "",
+            "| Task | Length | Config | Exact pair ratio | Exact QK tiles | Mean logical | Mean logits executed | Mean values executed | Selector logical | Selector dots executed | Selector QK tiles |",
+            "| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+        quantity_columns = (
+            "exact_physical_qk_tiles",
+            "mean_proxy_entries",
+            "mean_executed_logit_entries",
+            "mean_executed_value_entries",
+            "selector_proxy_entries",
+            "selector_executed_dot_entries",
+            "selector_physical_qk_tiles",
+        )
+        for row in summary.itertuples():
+            if pd.isna(getattr(row, "profile_samples", np.nan)):
+                continue
+            exact_ratio = getattr(row, "effective_exact_token_pair_ratio", np.nan)
+            exact_ratio = "—" if pd.isna(exact_ratio) else f"{exact_ratio:.1%}"
+            quantities = []
+            for column in quantity_columns:
+                value = getattr(row, column)
+                quantities.append("—" if pd.isna(value) else f"{value:,.0f}")
+            lines.append(
+                f"| {row.task} | {row.length_label} | {row.config_id} | {exact_ratio} | "
+                + " | ".join(quantities)
+                + " |"
+            )
 
     lines += ["", "## 逐项负结果", ""]
     negatives = []

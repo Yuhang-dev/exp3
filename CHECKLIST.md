@@ -54,8 +54,8 @@ Status legend: `[x]` complete, `[~]` in progress, `[ ]` pending, `[!]` blocked/f
 - [x] Run local syntax checks: `python -m compileall -q D:\long-context\exp3` (PASS on 2026-09-16).
 - [x] Document runnable remote quick/calibration/holdout/report/sweep commands in `README.md`.
 - [x] Document known reference-path costs and all GPU checks/experiments not run locally.
-- [~] Remote: rerun `check_math.py` after the CUDA Graph output-lifetime and Triton diagonal-branch fixes; the first run passed 7 numerical checks before the mask-identity check exposed reused compiled-output storage.
-- [ ] Remote: run the 4K quick loop and confirm all required output files are populated.
+- [x] Remote: rerun `check_math.py` on RTX 4090 after the CUDA Graph output-lifetime and Triton diagonal-branch fixes (PASS; completion of `run_quick.sh` confirms all focused checks returned successfully).
+- [x] Remote: run the 4K quick loop and confirm all required output files are populated (`metadata.status=complete`; report and independent profile generated).
 - [ ] Remote: run calibration, freeze selected configurations, then run disjoint holdout.
 
 ## Progress log
@@ -65,3 +65,5 @@ Status legend: `[x]` complete, `[~]` in progress, `[ ]` pending, `[!]` blocked/f
 - 2026-09-16: final interface audit completed. Synthetic counts are per variant, native context budgets reserve generation positions, and profile output separates logical proxy entries from physically executed dense proxy work. Only the three explicitly remote items above remain open.
 - 2026-09-16: repository published to `https://github.com/Yuhang-dev/exp3`; local `main` tracks `origin/main`. Repository description records the task-quality-first sparse-prefill scope for subsequent experiments.
 - 2026-09-16: first remote RTX 4090 quick run reached the focused checks. Exact output/LSE, exact+mean output/LSE, and all three selector checks passed. The run then exposed CUDA Graph reuse of compiled selector outputs; the public selector now clones both returned tensors outside `torch.compile`. The equivalent diagonal causal mask was also rewritten without a runtime Triton branch to remove the repeated scheduler diagnostic. Remote rerun remains pending.
+- 2026-09-16: patched remote quick rerun completed end to end. Both 4K synthetic variants scored 100 with all tested methods, but this is one saturated sample per variant. Every mean-corrected method was slower than dense: `mean_native` used about 71–72% exact pairs and took 1.18–1.20x dense time; `cgf_mean` and `dispersion_mean` used about 65–68% exact pairs and took about 1.30–1.31x dense time. This is retained as the P0 negative latency result; 16K/32K calibration remains pending.
+- 2026-09-16: quick report audit found that stage/profile quantities were present in `summary.csv` but absent from `REPORT.md`. The report now renders separate cross-layer stage-time and execution-quantity tables; existing quick artifacts can be rebuilt with the report-only command without rerunning the model.
