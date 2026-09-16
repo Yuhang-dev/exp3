@@ -297,7 +297,6 @@ def _flash_forward(
         )
         key_start = block_index * BLOCK_SIZE
         key_end = (block_index + 1) * BLOCK_SIZE
-        diagonal = block_index == logical_query_block
         for start in range(key_start, key_end, K_TILE_SIZE):
             offset_k = start + tl.arange(0, K_TILE_SIZE)
             k = tl.load(
@@ -311,12 +310,10 @@ def _flash_forward(
                 other=0.0,
             )
             qk = tl.dot(q, tl.trans(k))
-            if diagonal:
-                qk = tl.where(
-                    offset_q[:, None] >= offset_k[None, :],
-                    qk,
-                    float("-inf"),
-                )
+            causal = (block_index != logical_query_block) | (
+                offset_q[:, None] >= offset_k[None, :]
+            )
+            qk = tl.where(causal, qk, float("-inf"))
             qk *= scale_log2
             next_maximum = tl.maximum(maximum, tl.max(qk, axis=1))
             probabilities = tl.exp2(qk - next_maximum[:, None])
@@ -345,7 +342,7 @@ def _flash_forward(
 
 
 @torch.compile(mode="reduce-overhead")
-def deal_output_score(
+def _deal_output_score_compiled(
     score: torch.Tensor,
     attention_sink: int,
     window: int,
@@ -373,6 +370,28 @@ def deal_output_score(
     indices = key_ids.expand(batch, query_blocks, key_blocks, heads)
     indices = indices.masked_fill(~active, key_blocks).sort(dim=2).values
     return indices.contiguous(), counts.contiguous()
+
+
+def deal_output_score(
+    score: torch.Tensor,
+    attention_sink: int,
+    window: int,
+    alpha: float = 0.1,
+    last_n_blocks_full: int = 2,
+    min_budget: int = 0,
+):
+    indices, counts = _deal_output_score_compiled(
+        score,
+        attention_sink,
+        window,
+        alpha,
+        last_n_blocks_full,
+        min_budget,
+    )
+    # reduce-overhead uses CUDA Graph output buffers that are reused on the next
+    # call.  Materialize public outputs outside torch.compile so masks remain
+    # valid across layers and repeated selector calls.
+    return indices.clone(), counts.clone()
 
 
 @torch.compile

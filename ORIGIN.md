@@ -20,7 +20,9 @@ Exp3 keeps that V1 score, routing rule, protected regions, sorted-index conventi
 
 1. `_flash_forward` writes the exact path log-sum-exp in **natural-log units** as well as its normalized output;
 2. thin Python entry points expose V1 mean/scoring, selection, and exact attention separately;
-3. the old monolithic `FlashPrefill.autograd.Function` wrapper is omitted because exp3 profiles and combines the stages explicitly.
+3. the diagonal-block causal test is expressed as an equivalent predicated mask rather than a runtime Triton `if`, avoiding a scheduler diagnostic in the pinned remote environment;
+4. compiled routing outputs are cloned in the uncompiled public wrapper so CUDA Graph buffer reuse cannot invalidate masks retained across calls;
+5. the old monolithic `FlashPrefill.autograd.Function` wrapper is omitted because exp3 profiles and combines the stages explicitly.
 
 The new block variance, Value dispersion, balanced/CGF/dispersion selectors, unselected-mean path, and log-domain merge live in `exp3/kernels.py`; they are project code and are not labeled as an official FlashPrefill V2 kernel.
 
