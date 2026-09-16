@@ -1,6 +1,6 @@
 # exp3 implementation checklist
 
-Last updated: 2026-09-16
+Last updated: 2026-09-17
 
 Status legend: `[x]` complete, `[~]` in progress, `[ ]` pending, `[!]` blocked/failed.
 
@@ -56,7 +56,7 @@ Status legend: `[x]` complete, `[~]` in progress, `[ ]` pending, `[!]` blocked/f
 - [x] Document known reference-path costs and all GPU checks/experiments not run locally.
 - [x] Remote: rerun `check_math.py` on RTX 4090 after the CUDA Graph output-lifetime and Triton diagonal-branch fixes (PASS; completion of `run_quick.sh` confirms all focused checks returned successfully).
 - [x] Remote: run the 4K quick loop and confirm all required output files are populated (`metadata.status=complete`; report and independent profile generated).
-- [ ] Remote: run calibration, freeze selected configurations, then run disjoint holdout.
+- [~] Remote: calibration completed; choose any explicit alpha sweep, freeze selected configurations, then run the disjoint holdout.
 
 ## Progress log
 
@@ -67,3 +67,5 @@ Status legend: `[x]` complete, `[~]` in progress, `[ ]` pending, `[!]` blocked/f
 - 2026-09-16: first remote RTX 4090 quick run reached the focused checks. Exact output/LSE, exact+mean output/LSE, and all three selector checks passed. The run then exposed CUDA Graph reuse of compiled selector outputs; the public selector now clones both returned tensors outside `torch.compile`. The equivalent diagonal causal mask was also rewritten without a runtime Triton branch to remove the repeated scheduler diagnostic. Remote rerun remains pending.
 - 2026-09-16: patched remote quick rerun completed end to end. Both 4K synthetic variants scored 100 with all tested methods, but this is one saturated sample per variant. Every mean-corrected method was slower than dense: `mean_native` used about 71–72% exact pairs and took 1.18–1.20x dense time; `cgf_mean` and `dispersion_mean` used about 65–68% exact pairs and took about 1.30–1.31x dense time. This is retained as the P0 negative latency result; 16K/32K calibration remains pending.
 - 2026-09-16: quick report audit found that stage/profile quantities were present in `summary.csv` but absent from `REPORT.md`. The report now renders separate cross-layer stage-time and execution-quantity tables; existing quick artifacts can be rebuilt with the report-only command without rerunning the model.
+- 2026-09-17: P1 calibration completed (`metadata.status=complete`). At 16K all synthetic configurations scored 100; `fp_v1` was about 1.10–1.11x dense while mean-corrected paths were 1.03–1.13x slower. At 32K, dense remained 100; `fp_v1` reached about 1.26x speedup but fell to 58.33/33.33, and `mean_native` reached about 1.06x but fell to 58.33/41.67. `mean_balanced` retained the most synthetic quality among mean methods (75/91.67) but was about 1.03x dense time. On 8 HotpotQA samples, `fp_v1` matched dense score at about 1.12x; dispersion's +3.57 score observation was slower and is not treated as a statistical gain.
+- 2026-09-17: calibration profile localized the reference-path cost. At 32K, mean-tail took about 502–518 ms and merge about 143 ms; selectors took about 438–445 ms (`mean_balanced`), 655–659 ms (`cgf_mean`), and 821–825 ms (`dispersion_mean`). The existing dense PyTorch proxy computes substantially more entries than the logical unselected set. Candidate sweep/freeze and holdout remain pending.
