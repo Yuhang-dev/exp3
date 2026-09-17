@@ -216,6 +216,9 @@ This writes `rescoring/scorer-audit/{quality.csv,scores.jsonl,manifest.json,SUMM
 hashes of both raw artifact files and `scoring.py`. It never loads the model or modifies the original
 scores and predictions.
 
+The completed 20-sample-per-task 32K pilot, artifact hashes, paired failures, and interpretation are
+recorded in [RULER_PILOT_AUDIT.md](RULER_PILOT_AUDIT.md).
+
 ## Output contract
 
 | File | Contents |
