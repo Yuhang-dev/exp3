@@ -5,6 +5,9 @@ import re
 import string
 
 
+SCORER_VERSION = "exp3-scorers-v3-2026-09-17"
+
+
 def normalize_answer(text):
     def remove_articles(value):
         return re.sub(r"\b(a|an|the)\b", " ", value)
@@ -36,6 +39,7 @@ def score_hotpotqa(prediction, answers):
     )
     return {
         "metric": "longbench_official_token_f1",
+        "scorer_version": SCORER_VERSION,
         "score": 100.0 * f1,
         "exact_match": exact,
         "parsed_answer": prediction.strip(),
@@ -67,6 +71,7 @@ def score_synthetic(prediction, answers, target_keys):
     all_correct = float(all(correct.values()))
     return {
         "metric": "per_target_exact_match",
+        "scorer_version": SCORER_VERSION,
         "score": 100.0 * accuracy,
         "exact_match": all_correct,
         "parsed_answer": parsed,
@@ -76,9 +81,39 @@ def score_synthetic(prediction, answers, target_keys):
     }
 
 
+def score_ruler(prediction, answers, scorer_prefix):
+    scorer_text = scorer_prefix + prediction
+    official_hits = [int(answer.lower() in scorer_text.lower()) for answer in answers]
+    raw_hits = [int(answer.lower() in prediction.lower()) for answer in answers]
+    normalized_prediction = normalize_answer(scorer_text)
+    normalized_hits = [
+        int(normalize_answer(answer) in normalized_prediction)
+        for answer in answers
+    ]
+    recall = sum(official_hits) / len(official_hits)
+    all_correct = float(all(official_hits))
+    return {
+        "metric": "ruler_official_substring_recall",
+        "scorer_version": SCORER_VERSION,
+        "score": 100.0 * recall,
+        "exact_match": all_correct,
+        "parsed_answer": scorer_text,
+        "target_accuracy": recall,
+        "all_target_em": all_correct,
+        "target_correct": official_hits,
+        "raw_target_correct": raw_hits,
+        "normalized_target_correct": normalized_hits,
+        "raw_substring_score": 100.0 * sum(raw_hits) / len(raw_hits),
+        "normalized_substring_score": 100.0 * sum(normalized_hits) / len(normalized_hits),
+        "scorer_text": scorer_text,
+    }
+
+
 def score_prediction(sample, prediction):
     if sample["task"] == "synthetic_kv_retrieval":
         return score_synthetic(prediction, sample["answers"], sample["target_keys"])
     if sample["task"] == "hotpotqa":
         return score_hotpotqa(prediction, sample["answers"])
+    if sample["task"] == "ruler":
+        return score_ruler(prediction, sample["answers"], sample["scorer_prefix"])
     raise ValueError(f"unsupported task: {sample['task']}")

@@ -1,4 +1,4 @@
-"""Deterministic synthetic retrieval and complete-input LongBench hotpotqa subsets."""
+"""Deterministic synthetic, LongBench hotpotqa, and pinned RULER inputs."""
 
 import hashlib
 import json
@@ -12,6 +12,32 @@ from huggingface_hub import hf_hub_download
 
 LONGBENCH_REPO = "zai-org/LongBench"
 LONGBENCH_CODE_COMMIT = "2e00731f8d0bff23dc4325161044d0ed8af94c1e"
+RULER_REPO = "aldjalkdf/ruler"
+RULER_REVISION = "2a9d66ecfcdbcaa72d692b6e89d1fb3325e7d634"
+RULER_FLASH_PREFILL_COMMIT = "baa612047433a992a00d07dc178205eed065ae14"
+RULER_TASK_SPECS = {
+    "ruler_niah_mk_1": {
+        "dataset": "niah_multikey_1",
+        "generation_max_tokens": 50,
+        "plural": False,
+    },
+    "ruler_niah_mk_2": {
+        "dataset": "niah_multikey_2",
+        "generation_max_tokens": 50,
+        "plural": False,
+    },
+    "ruler_niah_mk_3": {
+        "dataset": "niah_multikey_3",
+        "generation_max_tokens": 100,
+        "plural": False,
+    },
+    "ruler_niah_mq": {
+        "dataset": "niah_multiquery",
+        "generation_max_tokens": 100,
+        "plural": True,
+    },
+}
+RULER_TASKS = tuple(RULER_TASK_SPECS)
 HOTPOT_PROMPT = (
     "Answer the question based on the given passages. Only give me the answer and do not output any other words.\n\n"
     "The following are given passages.\n{context}\n\n"
@@ -22,6 +48,14 @@ HOTPOT_PROMPT = (
 
 def input_hash(token_ids):
     return hashlib.sha256(np.asarray(token_ids, dtype=np.int32).tobytes()).hexdigest()
+
+
+def file_hash(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _chat_encoding(tokenizer, content, offsets=False):
@@ -247,6 +281,161 @@ def _archive_revision(path):
     return Path(path).parent.name
 
 
+def _ruler_prompt(spec, row, context):
+    needle_type = row["type_needle_v"]
+    query = row["query"]
+    if spec["plural"]:
+        user = (
+            f"Some special magic {needle_type} are hidden within the following text. "
+            f"Make sure to memorize it. I will quiz you about the {needle_type} afterwards.\n"
+            f"{context}\n"
+            f"What are all the special magic {needle_type} for {query} mentioned in the provided text?"
+        )
+        prefix = (
+            f"The special magic {needle_type} for {query} mentioned in the provided text are"
+        )
+    else:
+        user = (
+            f"A special magic {needle_type} is hidden within the following text. "
+            f"Make sure to memorize it. I will quiz you about the {needle_type} afterwards.\n"
+            f"{context}\n"
+            f"What is the special magic {needle_type} for {query} mentioned in the provided text?"
+        )
+        prefix = (
+            f"The special magic {needle_type} for {query} mentioned in the provided text is"
+        )
+    return user + "\n" + prefix, prefix
+
+
+def _tokenize_ruler_prompt(tokenizer, spec, row, prompt_budget):
+    context = row["context"]
+    prompt, prefix = _ruler_prompt(spec, row, context)
+    token_ids = tokenizer(prompt, add_special_tokens=True)["input_ids"]
+    original_tokens = len(token_ids)
+    original_context_chars = len(context)
+    if len(token_ids) > prompt_budget:
+        truncate_length = len(token_ids) - prompt_budget
+        encoded_context = tokenizer(
+            context,
+            add_special_tokens=True,
+            return_offsets_mapping=True,
+        )
+        cut = encoded_context["offset_mapping"][-truncate_length][0]
+        context = context[:cut]
+        prompt, prefix = _ruler_prompt(spec, row, context)
+        token_ids = tokenizer(prompt, add_special_tokens=True)["input_ids"]
+    if len(token_ids) > prompt_budget:
+        raise ValueError(
+            f"official RULER truncation left {len(token_ids)} tokens for a {prompt_budget}-token budget"
+        )
+    return {
+        "prompt": prompt,
+        "prefix": prefix,
+        "token_ids": token_ids,
+        "original_tokens": original_tokens,
+        "context_chars_removed": original_context_chars - len(context),
+    }
+
+
+def prepare_ruler(tokenizer, tasks, split, seed, total_budgets, samples, max_new_tokens):
+    if split != "ruler":
+        raise ValueError("official RULER tasks require --split ruler")
+    if samples < 1:
+        raise ValueError("ruler sample count must be positive")
+
+    inputs = []
+    files = {}
+    for total_budget in total_budgets:
+        if total_budget not in (4096, 8192, 16384, 32768):
+            raise ValueError("RULER parity supports the official 4K/8K/16K/32K files")
+        for task in tasks:
+            spec = RULER_TASK_SPECS[task]
+            generation_max = spec["generation_max_tokens"]
+            if max_new_tokens < generation_max:
+                raise ValueError(
+                    f"{task} requires at least --max-new-tokens {generation_max} for official parity"
+                )
+            filename = f"{spec['dataset']}/validation_{total_budget}.jsonl"
+            path = Path(hf_hub_download(
+                RULER_REPO,
+                filename,
+                repo_type="dataset",
+                revision=RULER_REVISION,
+            ))
+            source_rows = []
+            with path.open("rb") as source:
+                for source_row_index, raw_line in enumerate(source):
+                    if raw_line.strip():
+                        source_rows.append((
+                            source_row_index,
+                            hashlib.sha256(raw_line).hexdigest(),
+                            json.loads(raw_line),
+                        ))
+            if samples > len(source_rows):
+                raise ValueError(
+                    f"requested {samples} {task} samples, but {filename} contains {len(source_rows)}"
+                )
+            selected = np.random.default_rng(seed).permutation(len(source_rows))[:samples]
+            source_file_sha256 = file_hash(path)
+            files[filename] = {
+                "sha256": source_file_sha256,
+                "rows": len(source_rows),
+                "selected_source_rows": [int(source_rows[index][0]) for index in selected],
+            }
+            prompt_budget = total_budget - generation_max
+            for shuffle_rank, selected_index in enumerate(selected):
+                source_row_index, source_row_sha256, row = source_rows[int(selected_index)]
+                prepared = _tokenize_ruler_prompt(tokenizer, spec, row, prompt_budget)
+                token_ids = prepared["token_ids"]
+                answers = [str(answer) for answer in row["answer"]]
+                source_id = f"{task}:{total_budget}:{source_row_index}"
+                inputs.append({
+                    "task": "ruler",
+                    "task_label": f"RULER/{spec['dataset']}",
+                    "variant": task,
+                    "split": split,
+                    "source_split": "validation",
+                    "sample_id": source_id,
+                    "source_id": source_id,
+                    "sample_index": shuffle_rank,
+                    "seed": seed,
+                    "total_context_budget": total_budget,
+                    "prompt_budget": prompt_budget,
+                    "actual_tokens": len(token_ids),
+                    "question": str(row["query"]),
+                    "answers": answers,
+                    "expected_format": prepared["prefix"] + " " + ", ".join(answers),
+                    "scorer_prefix": prepared["prefix"],
+                    "prompt_text": prepared["prompt"],
+                    "prompt_sha256": hashlib.sha256(
+                        prepared["prompt"].encode("utf-8")
+                    ).hexdigest(),
+                    "source_repository": RULER_REPO,
+                    "source_revision": RULER_REVISION,
+                    "source_file": filename,
+                    "source_file_sha256": source_file_sha256,
+                    "source_row_index": source_row_index,
+                    "source_example_index": row.get("index"),
+                    "source_row_sha256": source_row_sha256,
+                    "source_declared_length": row.get("length"),
+                    "official_shuffle_rank": shuffle_rank,
+                    "original_prompt_tokens": prepared["original_tokens"],
+                    "context_chars_removed": prepared["context_chars_removed"],
+                    "max_new_tokens": generation_max,
+                    "input_sha256": input_hash(token_ids),
+                    "input_ids": token_ids,
+                })
+    revisions = {
+        "repository": RULER_REPO,
+        "revision": RULER_REVISION,
+        "flashprefill_repository_commit": RULER_FLASH_PREFILL_COMMIT,
+        "selection": "numpy.default_rng(seed).permutation; mirrors datasets.Dataset.shuffle(seed)",
+        "prompt": "FlashPrefill ruler/data.py load_ruler templates; use_chat_template=false",
+        "files": files,
+    }
+    return inputs, revisions
+
+
 def prepare_hotpotqa(tokenizer, split, seed, samples, max_new_tokens, native_limit=32768):
     if split == "quick":
         selected_split = "calibration"
@@ -313,12 +502,14 @@ def prepare_inputs(
     samples,
     synthetic_samples,
     hotpot_samples,
+    ruler_samples,
     max_new_tokens,
 ):
     inputs = []
     revisions = {
         "longbench_code_commit": LONGBENCH_CODE_COMMIT,
         "longbench_archive_revision": None,
+        "ruler": None,
     }
     if "synthetic_kv_retrieval" in tasks:
         inputs.extend(prepare_synthetic(
@@ -340,4 +531,17 @@ def prepare_inputs(
         )
         inputs.extend(hotpot)
         revisions["longbench_archive_revision"] = revision
+    ruler_tasks = [task for task in tasks if task in RULER_TASKS]
+    if ruler_tasks:
+        ruler, ruler_revision = prepare_ruler(
+            tokenizer,
+            ruler_tasks,
+            split,
+            seed,
+            total_budgets,
+            ruler_samples or samples,
+            max_new_tokens,
+        )
+        inputs.extend(ruler)
+        revisions["ruler"] = ruler_revision
     return inputs, revisions

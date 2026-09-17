@@ -160,18 +160,73 @@ python -u diagnose_quality.py results/calibration
 It writes `quality_rescored.csv`, `target_diagnosis.csv`, and `QUALITY_DIAGNOSIS.md` into the run directory.
 `Value recall` is a diagnostic only; the primary synthetic metric remains parsed per-target exact match.
 
+## 8. Official RULER parity run
+
+The parity run uses the four retrieval tasks most directly related to the custom failure:
+`niah_multikey_1`, `niah_multikey_2`, `niah_multikey_3`, and `niah_multiquery`.
+It pins the FlashPrefill evaluation code at commit
+`baa612047433a992a00d07dc178205eed065ae14` and the
+[`aldjalkdf/ruler`](https://huggingface.co/datasets/aldjalkdf/ruler) data at revision
+`2a9d66ecfcdbcaa72d692b6e89d1fb3325e7d634`. Prompts are rebuilt with the pinned
+`load_ruler` templates, no chat template, and the official 50/100-token task limits.
+For quality generation it also mirrors the upstream `SelfdefinedModel` boundary: sparse prefill runs
+on all but the final prompt token, then the final prompt token and generated tokens use the common
+dense single-token decode path. The separately reported exp3 prefill latency retains this project's
+existing full-prompt timing definition, so it is not relabeled as the paper's vLLM TTFT.
+
+First run 20 samples per task with only dense and FlashPrefill V1:
+
+```bash
+bash run_ruler.sh pilot
+```
+
+If the parity result warrants the official cap, run 100 samples per task:
+
+```bash
+bash run_ruler.sh full
+```
+
+The defaults write to `results/ruler_32k_pilot20` and `results/ruler_32k_full100`.
+The wrapper refuses to overwrite a directory that already contains run artifacts and saves
+`check_math.log`, `run.log`, and `rescore.log`. An optional second argument selects a new output
+directory.
+
+RULER's primary score is the pinned repository's case-insensitive answer-substring recall. Every
+generation is flushed to the scorer-independent `generations.jsonl`, and the entire GPU generation
+phase finishes before scoring starts. The scored copies then go to `predictions.jsonl`. The official
+scorer text (which prepends the completion prefix),
+per-answer decisions, normalized diagnostic score, generated token IDs, and scorer version are
+stored separately. Each selected source row, full rebuilt prompt, standard
+answers, exact input IDs, source file/row hashes, shuffle rank, and tokenizer-result hash are also
+saved. Thus a scorer change does not require another model run.
+
+Create another immutable derived scoring snapshot at any time:
+
+```bash
+python -u rescore.py results/ruler_32k_pilot20 --tag scorer-audit
+# or
+bash run_ruler.sh rescore results/ruler_32k_pilot20 scorer-audit
+```
+
+This writes `rescoring/scorer-audit/{quality.csv,scores.jsonl,manifest.json,SUMMARY.md}` and records
+hashes of both raw artifact files and `scoring.py`. It never loads the model or modifies the original
+scores and predictions.
+
 ## Output contract
 
 | File | Contents |
 | --- | --- |
 | `metadata.json` | environment/GPU, model revision/config, sources, formula version, dtype/RoPE/cache/routing settings, run arguments and failure status |
 | `inputs.jsonl`, `inputs.pt` | human-readable provenance and exact token IDs |
-| `predictions.jsonl` | one generation per config/sample, generated token IDs/text, parsed answer, end reason and task score |
+| `generations.jsonl` | scorer-independent generated token IDs and untouched raw text, flushed per record before the scoring phase |
+| `predictions.jsonl` | scored copy of each generation with scorer text, parsed answer, end reason and complete score details |
+| `scorer_manifest.json` | scorer version, implementation SHA256, pinned prompt/scorer provenance, and offline rescore entrypoint |
 | `quality.csv` | de-duplicated config/sample task score and paired dense delta |
 | `timings.csv` | every synchronized full-model prefill repeat and peak allocated/reserved memory |
 | `profile.csv` | per-layer independent descriptor/selector/indices/exact/mean/merge timing and density/execution counts |
 | `summary.csv`, `REPORT.md` | per-task/per-length quality–latency comparison, sample counts, paired speedups and explicit negative results |
 | `quality_latency.png` | per-task/per-length quality versus measured prefill latency |
+| `rescoring/<tag>/` | derived offline scores plus hashes of the exact inputs, raw predictions, and scorer implementation; no generation rerun |
 
 Main timing starts after input IDs are already on the GPU and ends after the final-position LM head and first-token argmax synchronize. It includes descriptor construction, routing, exact/mean attention, merge, projections, norms, MLPs, and the complete KV cache. It excludes model loading, tokenization, H2D, compilation and autotune. Each target shape/config is warmed first; method order rotates across the three raw repeats.
 

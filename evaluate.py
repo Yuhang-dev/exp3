@@ -3,6 +3,7 @@
 import argparse
 import csv
 from dataclasses import asdict, dataclass
+import hashlib
 import json
 from pathlib import Path
 import platform
@@ -17,8 +18,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import triton
 
 from attention import AttentionBackend, METHODS
-from data import input_hash, prepare_inputs
-from scoring import score_prediction
+from data import RULER_TASKS, input_hash, prepare_inputs
+from scoring import SCORER_VERSION, score_prediction
 from upstream import flashprefill_native_forward as upstream
 
 
@@ -40,12 +41,16 @@ def arguments():
         help="Explicit method or method:alpha; repeat for a small mixed-alpha run.",
     )
     parser.add_argument("--config", type=Path, help="JSON file containing a candidates list.")
-    parser.add_argument("--split", choices=("quick", "calibration", "holdout"), default="quick")
+    parser.add_argument(
+        "--split",
+        choices=("quick", "calibration", "holdout", "ruler"),
+        default="quick",
+    )
     parser.add_argument(
         "--tasks",
         "--task",
         nargs="+",
-        choices=("synthetic_kv_retrieval", "hotpotqa"),
+        choices=("synthetic_kv_retrieval", "hotpotqa", *RULER_TASKS),
         default=["synthetic_kv_retrieval"],
     )
     parser.add_argument(
@@ -65,6 +70,7 @@ def arguments():
     parser.add_argument("--samples", type=int, default=2)
     parser.add_argument("--synthetic-samples", type=int)
     parser.add_argument("--hotpot-samples", type=int)
+    parser.add_argument("--ruler-samples", type=int, help="Samples per selected RULER task and length.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--alpha", type=float, default=0.08)
     parser.add_argument("--max-new-tokens", type=int, default=128)
@@ -160,6 +166,7 @@ def load_or_prepare_inputs(args, tokenizer):
             args.samples,
             args.synthetic_samples,
             args.hotpot_samples,
+            args.ruler_samples,
             args.max_new_tokens,
         )
     stored_splits = {sample["split"] for sample in inputs}
@@ -178,6 +185,10 @@ def load_or_prepare_inputs(args, tokenizer):
 
 def write_metadata(path, metadata):
     path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def source_hash(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 def base_metadata(args, candidates, inputs, revisions):
@@ -199,6 +210,14 @@ def base_metadata(args, candidates, inputs, revisions):
         "transformers": transformers.__version__,
         "triton": triton.__version__,
         "method_formula_version": "quality-first-v2-2026-09-16",
+        "scoring": {
+            "version": SCORER_VERSION,
+            "implementation": "scoring.py",
+            "implementation_sha256": source_hash(Path(__file__).with_name("scoring.py")),
+            "raw_generation_artifact": "generations.jsonl; flushed before scoring",
+            "execution_order": "finish all GPU generations, then score from saved raw records",
+            "offline_rescore_entrypoint": "rescore.py",
+        },
         "upstream": {
             "repository": "qhfan/FlashPrefill",
             "commit": "baa612047433a992a00d07dc178205eed065ae14",
@@ -216,6 +235,10 @@ def base_metadata(args, candidates, inputs, revisions):
             "rope": "model original",
             "prefill_cache": True,
             "decode": "dense PyTorch Flash SDPA",
+            "ruler_quality_generation": (
+                "mirror upstream SelfdefinedModel: sparse prefill input[:-1], then process "
+                "the final prompt token and generated tokens through dense single-token decode"
+            ),
             "batch_size": 1,
         },
         "prompt_and_scorer": {
@@ -226,6 +249,13 @@ def base_metadata(args, candidates, inputs, revisions):
             ),
             "hotpotqa_scorer": (
                 "THUDM/LongBench LongBench/metrics.py qa_f1_score; max over answers"
+            ),
+            "ruler_prompt": (
+                "qhfan/FlashPrefill ruler/data.py load_ruler at "
+                "baa612047433a992a00d07dc178205eed065ae14; use_chat_template=false"
+            ),
+            "ruler_scorer": (
+                "case-insensitive answer substring recall from the same pinned load_ruler"
             ),
         },
     }
@@ -281,9 +311,26 @@ def _eos_ids(model, tokenizer):
 
 
 @torch.inference_mode()
-def generate(model, tokenizer, input_ids, max_new_tokens):
+def generate(model, tokenizer, input_ids, max_new_tokens, split_last_prompt_token=False):
     torch.compiler.cudagraph_mark_step_begin()
-    output = model(input_ids=input_ids, use_cache=True, logits_to_keep=1)
+    if split_last_prompt_token:
+        prefill_output = model.model(input_ids=input_ids[:, :-1], use_cache=True)
+        cache = prefill_output.past_key_values
+        del prefill_output
+        cache_position = torch.tensor(
+            [input_ids.shape[1] - 1],
+            dtype=torch.long,
+            device=input_ids.device,
+        )
+        output = model(
+            input_ids=input_ids[:, -1:],
+            past_key_values=cache,
+            use_cache=True,
+            cache_position=cache_position,
+            logits_to_keep=1,
+        )
+    else:
+        output = model(input_ids=input_ids, use_cache=True, logits_to_keep=1)
     token = output.logits[:, -1].argmax(dim=-1, keepdim=True)
     cache = output.past_key_values
     del output
@@ -328,7 +375,7 @@ def profile_prefill(model, backend, input_ids):
 def sample_key(sample):
     length_label = (
         str(sample["total_context_budget"])
-        if sample["task"] == "synthetic_kv_retrieval"
+        if sample["task"] in ("synthetic_kv_retrieval", "ruler")
         else "actual"
     )
     return {
@@ -360,8 +407,9 @@ def write_quality(rows, path):
     fields = [
         "method", "config_id", "alpha", "task", "split", "length_label",
         "total_context_budget", "prompt_budget", "actual_tokens", "sample_id",
-        "source_id", "metric", "score", "delta_vs_dense", "exact_match",
-        "target_accuracy", "all_target_em", "parsed_answer",
+        "source_id", "metric", "scorer_version", "score", "delta_vs_dense",
+        "exact_match", "target_accuracy", "all_target_em", "raw_substring_score",
+        "normalized_substring_score", "parsed_answer",
     ]
     sink = CsvSink(path, fields)
     for row in rows:
@@ -401,8 +449,8 @@ def run(args, candidates, inputs, metadata):
         "mean_executed_value_entries", "selector_executed_dot_entries",
         "selector_physical_qk_tiles", "q_tile_size", "k_tile_size", "score_k_tile_size",
     ])
-    predictions = (args.out / "predictions.jsonl").open("w", encoding="utf-8")
-    quality_rows = []
+    generations = (args.out / "generations.jsonl").open("w", encoding="utf-8")
+    generation_records = []
     warmed = set()
     profiled = set()
 
@@ -448,38 +496,30 @@ def run(args, candidates, inputs, metadata):
                     tokenizer,
                     input_ids,
                     sample["max_new_tokens"],
+                    split_last_prompt_token=sample["task"] == "ruler",
                 )
-                scored = score_prediction(sample, text)
-                parsed = json.dumps(scored["parsed_answer"], ensure_ascii=False)
-                quality_row = {
-                    "method": candidate.method,
-                    "config_id": candidate.config_id,
-                    "alpha": candidate.alpha,
-                    **key,
-                    "metric": scored["metric"],
-                    "score": scored["score"],
-                    "exact_match": scored["exact_match"],
-                    "target_accuracy": scored["target_accuracy"],
-                    "all_target_em": scored["all_target_em"],
-                    "parsed_answer": parsed,
-                }
-                quality_rows.append(quality_row)
-                prediction = {
+                generation_record = {
                     **key,
                     "method": candidate.method,
                     "config_id": candidate.config_id,
                     "alpha": candidate.alpha,
+                    "input_sha256": sample["input_sha256"],
                     "generated_token_ids": token_ids,
                     "text": text,
-                    "parsed_answer": scored["parsed_answer"],
+                    "raw_text": text,
                     "end_reason": reason,
-                    "score": scored,
+                    "generation_path": (
+                        "upstream_ruler_split_final_prompt_token"
+                        if sample["task"] == "ruler"
+                        else "full_prompt_prefill"
+                    ),
                 }
-                predictions.write(json.dumps(prediction, ensure_ascii=False) + "\n")
-                predictions.flush()
+                generations.write(json.dumps(generation_record, ensure_ascii=False) + "\n")
+                generations.flush()
+                generation_records.append(generation_record)
                 print(
-                    f"Quality {candidate.config_id:28s} {sample['sample_id']} "
-                    f"{scored['metric']}={scored['score']:.2f}",
+                    f"Generation {candidate.config_id:25s} {sample['sample_id']} "
+                    f"tokens={len(token_ids)} end={reason}",
                     flush=True,
                 )
 
@@ -503,6 +543,43 @@ def run(args, candidates, inputs, metadata):
 
     timing_sink.close()
     profile_sink.close()
+    generations.close()
+
+    inputs_by_id = {sample["sample_id"]: sample for sample in inputs}
+    predictions = (args.out / "predictions.jsonl").open("w", encoding="utf-8")
+    quality_rows = []
+    for generation_record in generation_records:
+        sample = inputs_by_id[generation_record["sample_id"]]
+        text = generation_record["raw_text"]
+        scored = score_prediction(sample, text)
+        parsed = json.dumps(scored["parsed_answer"], ensure_ascii=False)
+        quality_row = {
+            **{field: generation_record[field] for field in common_fields},
+            "metric": scored["metric"],
+            "scorer_version": scored["scorer_version"],
+            "score": scored["score"],
+            "exact_match": scored["exact_match"],
+            "target_accuracy": scored["target_accuracy"],
+            "all_target_em": scored["all_target_em"],
+            "raw_substring_score": scored.get("raw_substring_score"),
+            "normalized_substring_score": scored.get("normalized_substring_score"),
+            "parsed_answer": parsed,
+        }
+        quality_rows.append(quality_row)
+        prediction = {
+            **generation_record,
+            "scorer_text": scored.get("scorer_text", text),
+            "parsed_answer": scored["parsed_answer"],
+            "scorer_version": scored["scorer_version"],
+            "score": scored,
+        }
+        predictions.write(json.dumps(prediction, ensure_ascii=False) + "\n")
+        predictions.flush()
+        print(
+            f"Quality {generation_record['config_id']:28s} {sample['sample_id']} "
+            f"{scored['metric']}={scored['score']:.2f}",
+            flush=True,
+        )
     predictions.close()
     write_quality(quality_rows, args.out / "quality.csv")
     metadata["status"] = "complete"
@@ -520,6 +597,8 @@ def main():
         raise ValueError("synthetic-samples must be positive")
     if args.hotpot_samples is not None and args.hotpot_samples < 1:
         raise ValueError("hotpot-samples must be positive")
+    if args.ruler_samples is not None and args.ruler_samples < 1:
+        raise ValueError("ruler-samples must be positive")
     if args.alpha < 0:
         raise ValueError("alpha must be non-negative")
     args.out.mkdir(parents=True, exist_ok=True)
@@ -530,6 +609,10 @@ def main():
     inputs, revisions = load_or_prepare_inputs(args, tokenizer)
     metadata = base_metadata(args, candidates, inputs, revisions)
     write_metadata(args.out / "metadata.json", metadata)
+    write_metadata(args.out / "scorer_manifest.json", {
+        **metadata["scoring"],
+        "prompt_and_scorer": metadata["prompt_and_scorer"],
+    })
     if args.prepare_only:
         print(f"Prepared {len(inputs)} fixed inputs in {args.out}", flush=True)
         return
