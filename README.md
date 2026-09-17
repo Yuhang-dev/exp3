@@ -116,15 +116,23 @@ bash run_pilot.sh holdout results/calibration/frozen_selection.json results/hold
 
 The code does not tune from holdout scores and does not silently change a failed/OOM configuration. An exception is written into `metadata.json` and then re-raised.
 
-## 5. Explicit small alpha sweep
+## 5. Focused 32K alpha sweep
 
-The supplied sweep has one mean baseline and two new candidates at `alpha={0.04,0.08,0.16}`, plus dense:
+The supplied sweep compares all four mean-corrected methods at
+`alpha={0.04,0.08,0.16}`. Dense and `fp_v1:0.08` are rerun in the same batch as paired references.
+It uses only the discriminating 32K synthetic multi-key and multi-query calibration inputs: 4
+samples per variant, 8 inputs total, and 14 configurations (112 scored generations). The saturated
+16K inputs and non-discriminating eight-row HotpotQA subset are not repeated. Although `cgf_mean`
+and `dispersion_mean` were slower and lower-quality than `mean_balanced` at `alpha=0.08`, they remain
+in this sweep by explicit experiment decision so their ranking can be checked across thresholds and
+actual densities.
 
 ```bash
-bash run_pilot.sh sweep results/calibration_sweep
+bash run_pilot.sh sweep results/calibration_sweep_32k
 ```
 
-For a different two-candidate set, call the CLI explicitly with repeated entries such as:
+The exact candidate list is frozen in `focused_sweep_candidates.json`. For a different candidate
+set, call the CLI explicitly with repeated entries such as:
 
 ```bash
 python -u evaluate.py \

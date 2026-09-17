@@ -1,0 +1,18 @@
+{
+  "candidates": [
+    {"method": "dense"},
+    {"method": "fp_v1", "alpha": 0.08},
+    {"method": "mean_native", "alpha": 0.04},
+    {"method": "mean_native", "alpha": 0.08},
+    {"method": "mean_native", "alpha": 0.16},
+    {"method": "mean_balanced", "alpha": 0.04},
+    {"method": "mean_balanced", "alpha": 0.08},
+    {"method": "mean_balanced", "alpha": 0.16},
+    {"method": "cgf_mean", "alpha": 0.04},
+    {"method": "cgf_mean", "alpha": 0.08},
+    {"method": "cgf_mean", "alpha": 0.16},
+    {"method": "dispersion_mean", "alpha": 0.04},
+    {"method": "dispersion_mean", "alpha": 0.08},
+    {"method": "dispersion_mean", "alpha": 0.16}
+  ]
+}

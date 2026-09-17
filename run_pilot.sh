@@ -37,23 +37,13 @@ case "$PHASE" in
       --out "$OUTPUT"
     ;;
   sweep)
-    OUTPUT="${2:-results/calibration_sweep}"
+    OUTPUT="${2:-results/calibration_sweep_32k}"
     python -u evaluate.py \
       --split calibration \
-      --tasks synthetic_kv_retrieval hotpotqa \
-      --lengths 16384 32768 \
+      --tasks synthetic_kv_retrieval \
+      --lengths 32768 \
       --synthetic-samples 4 \
-      --hotpot-samples 8 \
-      --candidate dense \
-      --candidate mean_native:0.04 \
-      --candidate mean_native:0.08 \
-      --candidate mean_native:0.16 \
-      --candidate cgf_mean:0.04 \
-      --candidate cgf_mean:0.08 \
-      --candidate cgf_mean:0.16 \
-      --candidate dispersion_mean:0.04 \
-      --candidate dispersion_mean:0.08 \
-      --candidate dispersion_mean:0.16 \
+      --config focused_sweep_candidates.json \
       --max-new-tokens 128 \
       --repeats 3 \
       --profile \
