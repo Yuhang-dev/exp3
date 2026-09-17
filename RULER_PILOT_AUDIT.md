@@ -73,6 +73,9 @@ operator-only numbers.
 
 ## Decision
 
-The pilot is internally valid and sufficiently close in quality delta to justify the already
-planned 100-sample-per-task expansion of the same four-task parity check. The full run remains
-necessary because the net -1.56 result is determined by only a few paired changes.
+The pilot is internally valid and sufficiently close in quality delta to resolve the scoped
+reproduction question: V1 shows a small paper-like loss under the pinned RULER harness, and the
+custom-task collapse is not a scorer-only artifact. On 2026-09-17, the user chose not to spend
+additional GPU time on the optional 100-sample-per-task expansion. The result is adequate for this
+diagnostic decision, but it is not presented as a formal statistical non-inferiority estimate or a
+reproduction of the paper's all-13-task absolute score.
