@@ -188,8 +188,12 @@ bash run_ruler.sh full
 
 The defaults write to `results/ruler_32k_pilot20` and `results/ruler_32k_full100`.
 The wrapper refuses to overwrite a directory that already contains run artifacts and saves
-`check_math.log`, `run.log`, and `rescore.log`. An optional second argument selects a new output
-directory.
+`check_math.log`, timestamped `run_*.log`, and timestamped `rescore_*.log`. It defaults only the
+Hugging Face transport endpoint to `https://hf-mirror.com` for the remote AutoDL environment; the
+dataset repository and pinned revision remain unchanged and every resolved file is hashed. Set
+`HF_ENDPOINT` explicitly to override it. An optional second argument selects a new output directory.
+If a previous attempt already produced `check_math.json`, rerunning the same pilot directory reuses
+that completed check instead of spending GPU time on it again.
 
 RULER's primary score is the pinned repository's case-insensitive answer-substring recall. Every
 generation is flushed to the scorer-independent `generations.jsonl`, and the entire GPU generation
