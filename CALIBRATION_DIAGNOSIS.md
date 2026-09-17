@@ -25,6 +25,13 @@ independent re-score. The 32K quality loss is not caused by report aggregation, 
 | multi-query | cgf_mean | 58.33 | 58.33 | 5 |
 | multi-query | dispersion_mean | 75.00 | 75.00 | 3 |
 
+The apparent HotpotQA improvement from `dispersion_mean` is concentrated in one of the eight
+calibration samples. On that sample, dense, V1, `mean_native`, `mean_balanced`, and `cgf_mean` all
+score 0, while `dispersion_mean` scores 28.57; the other seven dense/dispersion pairs have identical
+scores. This is a useful candidate signal, not evidence of a stable +3.57 task-level gain. It should
+be checked on the 16 disjoint HotpotQA holdout samples after the alpha configuration is frozen,
+rather than used to tune repeatedly on the same single calibration case.
+
 `mean_native` multi-key gains one target under value-only recall because the correct value appears under
 the wrong key. This is a key/value binding error, not a formatting-only success. No relaxed value-occurrence
 score recovers the `fp_v1` result.

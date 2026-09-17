@@ -122,10 +122,12 @@ The supplied sweep compares all four mean-corrected methods at
 `alpha={0.04,0.08,0.16}`. Dense and `fp_v1:0.08` are rerun in the same batch as paired references.
 It uses only the discriminating 32K synthetic multi-key and multi-query calibration inputs: 4
 samples per variant, 8 inputs total, and 14 configurations (112 scored generations). The saturated
-16K inputs and non-discriminating eight-row HotpotQA subset are not repeated. Although `cgf_mean`
-and `dispersion_mean` were slower and lower-quality than `mean_balanced` at `alpha=0.08`, they remain
-in this sweep by explicit experiment decision so their ranking can be checked across thresholds and
-actual densities.
+16K inputs are not repeated. The eight-row HotpotQA calibration subset is also not swept: its
+apparent `dispersion_mean` gain came entirely from one sample, so choosing alpha against it would
+retune to that case. The frozen continuation will instead test the chosen candidates on 16 disjoint
+HotpotQA holdout samples. Although `cgf_mean` and `dispersion_mean` were slower and lower-quality
+than `mean_balanced` on the 32K synthetic calibration at `alpha=0.08`, they remain in this sweep by
+explicit experiment decision so their ranking can be checked across thresholds and actual densities.
 
 ```bash
 bash run_pilot.sh sweep results/calibration_sweep_32k
