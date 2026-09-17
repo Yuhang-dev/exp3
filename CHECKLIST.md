@@ -49,7 +49,7 @@ Status legend: `[x]` complete, `[~]` in progress, `[ ]` pending, `[!]` blocked/f
 
 ## Phase 5 — focused checks and handoff
 
-- [x] Add small exact-vs-dense, fixed-mask exact+mean, selector, mask-identity, and future-K/V checks.
+- [x] Add small exact-vs-dense, fixed-mask exact+mean, selector, V1 proxy-score/selection reference, mask-identity, and future-K/V checks.
 - [x] Add the zero-dispersion explanatory counterexample.
 - [x] Run local syntax checks: `python -m compileall -q D:\long-context\exp3` (PASS on 2026-09-16).
 - [x] Document runnable remote quick/calibration/holdout/report/sweep commands in `README.md`.
@@ -57,6 +57,7 @@ Status legend: `[x]` complete, `[~]` in progress, `[ ]` pending, `[!]` blocked/f
 - [x] Remote: rerun `check_math.py` on RTX 4090 after the CUDA Graph output-lifetime and Triton diagonal-branch fixes (PASS; completion of `run_quick.sh` confirms all focused checks returned successfully).
 - [x] Remote: run the 4K quick loop and confirm all required output files are populated (`metadata.status=complete`; report and independent profile generated).
 - [~] Remote: resolve the FlashPrefill V1 32K reproduction discrepancy before method selection: add explicit V1 score/mask parity against the pinned upstream implementation, then run dense and `fp_v1` on the official RULER multi-key/multi-query subset with the official prompts and scorer.
+- [~] Remote: re-score the saved calibration generations with `diagnose_quality.py` and inspect per-target format/case gaps, wrong values, omissions, and max-token endings.
 - [ ] Remote: after the V1 parity check, choose any explicit alpha sweep, freeze selected configurations, then run the disjoint holdout.
 
 ## Progress log
@@ -71,3 +72,4 @@ Status legend: `[x]` complete, `[~]` in progress, `[ ]` pending, `[!]` blocked/f
 - 2026-09-17: P1 calibration completed (`metadata.status=complete`). At 16K all synthetic configurations scored 100; `fp_v1` was about 1.10–1.11x dense while mean-corrected paths were 1.03–1.13x slower. At 32K, dense remained 100; `fp_v1` reached about 1.26x speedup but fell to 58.33/33.33, and `mean_native` reached about 1.06x but fell to 58.33/41.67. `mean_balanced` retained the most synthetic quality among mean methods (75/91.67) but was about 1.03x dense time. On 8 HotpotQA samples, `fp_v1` matched dense score at about 1.12x; dispersion's +3.57 score observation was slower and is not treated as a statistical gain.
 - 2026-09-17: calibration profile localized the reference-path cost. At 32K, mean-tail took about 502–518 ms and merge about 143 ms; selectors took about 438–445 ms (`mean_balanced`), 655–659 ms (`cgf_mean`), and 821–825 ms (`dispersion_mean`). The existing dense PyTorch proxy computes substantially more entries than the logical unselected set. Candidate sweep/freeze and holdout remain pending.
 - 2026-09-17: FlashPrefill V1 paper audit found a material unresolved reproduction gap. Its Qwen2.5-7B 32K RULER aggregate changes only from 90.14 to 88.25, whereas the custom 32K retrieval tasks fall from 100 to 58.33/33.33. The published `alpha=0.08`, 128-token blocks, sink/window settings, and about 20.8% density agree with this run's configuration and about 20.4% density. However, the official run uses RULER prompts without the chat template and substring-recall scoring, while this project uses denser same-format KV distractors, three required answers, the chat template, and parsed exact match. Until upstream numerical parity and an official-RULER subset run are complete, the observed failure is treated as task-local rather than a general V1 quality conclusion.
+- 2026-09-17: added an offline saved-generation diagnosis. It independently recomputes every score and reports answer-value substring recall alongside strict parsing, classifying each failed target as case-only, correct-value-but-unparsed, wrong value after the requested key, key without a value, or complete omission. The remote calibration artifacts are required to determine which mechanism caused the reported 32K loss.

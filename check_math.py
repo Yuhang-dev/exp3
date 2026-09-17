@@ -42,6 +42,42 @@ def dense_reference(q, k, v, scale):
     return output, lse
 
 
+def v1_score_reference(q, mean_k, scale, block_size=128):
+    """Independent FP32 expression for V1's query-tile/key-block mass."""
+    batch, sequence, heads, _ = q.shape
+    blocks = mean_k.shape[1]
+    expanded_k = mean_k.repeat_interleave(heads // mean_k.shape[2], dim=2).float()
+    logits = torch.einsum("bqhd,bkhd->bhqk", q.float(), expanded_k) * scale
+    query_positions = torch.arange(sequence, device=q.device)
+    key_ends = (torch.arange(blocks, device=q.device) + 1) * block_size - 1
+    logits.masked_fill_(query_positions[:, None] < key_ends[None, :], float("-inf"))
+    padded = blocks * block_size - sequence
+    logits = torch.nn.functional.pad(logits, (0, 0, 0, padded), value=float("-inf"))
+    logits = logits.reshape(batch, heads, blocks, block_size, blocks)
+    maximum = logits.amax(dim=(3, 4), keepdim=True)
+    maximum = torch.where(torch.isfinite(maximum), maximum, 0.0)
+    mass = torch.exp(logits - maximum).sum(dim=3)
+    normalized = mass / (mass.sum(dim=-1, keepdim=True) + 1e-9)
+    return normalized.permute(0, 2, 3, 1).contiguous()
+
+
+def v1_selection_reference(scores, sink_blocks, window_blocks, alpha, last_full_blocks):
+    batch, query_blocks, key_blocks, heads = scores.shape
+    query_ids = torch.arange(query_blocks, device=scores.device).view(1, query_blocks, 1, 1)
+    key_ids = torch.arange(key_blocks, device=scores.device).view(1, 1, key_blocks, 1)
+    distance = query_ids - key_ids
+    keep = scores >= scores.amax(dim=2, keepdim=True) * alpha
+    protected = (
+        (key_ids < sink_blocks)
+        | ((distance >= 0) & (distance < window_blocks))
+        | (query_ids >= query_blocks - last_full_blocks)
+    )
+    active = (keep | protected) & (distance >= 0)
+    indices = key_ids.expand(batch, query_blocks, key_blocks, heads)
+    indices = indices.masked_fill(~active, key_blocks).sort(dim=2).values
+    return indices.contiguous(), active.sum(dim=2).to(torch.int32).contiguous()
+
+
 def explicit_mean_reference(q, k, v, selected, descriptors, scale):
     batch, sequence, heads, _ = q.shape
     blocks = selected.shape[1]
@@ -174,6 +210,27 @@ def main():
         actual = kernels.selector_scores(q, descriptors, scale, selector, chunk_tiles=2)
         expected = selector_reference(q, descriptors, scale, selector)
         compare(f"selector_{selector}", actual, expected, records, atol=2e-5, rtol=2e-5)
+
+    audit_length = 1089
+    audit_q = torch.randn(1, audit_length, 28, 128, device="cuda", dtype=torch.bfloat16)
+    audit_k = torch.randn(1, audit_length, 4, 128, device="cuda", dtype=torch.bfloat16)
+    audit_mean = upstream.block_mean_k(audit_k)
+    audit_mean_reference = torch.stack(
+        [audit_k[:, start:start + 128].float().mean(dim=1) for start in range(0, audit_length, 128)],
+        dim=1,
+    )
+    compare("v1_block_mean", audit_mean, audit_mean_reference, records, atol=0.002, rtol=0.02)
+    audit_scores = upstream.v1_scores(audit_q, audit_mean, scale).clone()
+    audit_score_reference = v1_score_reference(audit_q, audit_mean, scale)
+    compare("v1_proxy_scores", audit_scores, audit_score_reference, records, atol=2e-4, rtol=0.005)
+
+    selection_input = audit_scores.square().square()
+    audit_indices, audit_counts = upstream.deal_output_score(selection_input, 2, 4, 0.8, 2, 0)
+    reference_indices, reference_counts = v1_selection_reference(selection_input, 2, 4, 0.8, 2)
+    torch.testing.assert_close(audit_indices, reference_indices, atol=0, rtol=0)
+    torch.testing.assert_close(audit_counts, reference_counts, atol=0, rtol=0)
+    records.append({"check": "v1_threshold_and_protected_selection", "exact_match": True})
+    print("PASS v1_threshold_and_protected_selection", flush=True)
 
     backend = AttentionBackend(alpha=0.08)
     record = {"events": {}}

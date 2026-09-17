@@ -148,6 +148,18 @@ python -u report.py results/calibration
 bash run_pilot.sh report results/calibration
 ```
 
+## 7. Re-score and diagnose saved generations
+
+This does not load the model or rerun generation. It verifies every stored score and separates strict
+`KEY=VALUE` failures from outputs that still contain the correct answer value:
+
+```bash
+python -u diagnose_quality.py results/calibration
+```
+
+It writes `quality_rescored.csv`, `target_diagnosis.csv`, and `QUALITY_DIAGNOSIS.md` into the run directory.
+`Value recall` is a diagnostic only; the primary synthetic metric remains parsed per-target exact match.
+
 ## Output contract
 
 | File | Contents |
@@ -171,7 +183,7 @@ The independent profile records three different quantities: effective exact caus
 python -u check_math.py --out results/check_math.json
 ```
 
-The check covers an incomplete final block, Q padding, 28:4 GQA, model scaling, all-exact output and natural-log LSE against dense FP32, a hand-fixed exact+mean mask, all three new selector formulas, `mean_native`/`fp_v1` mask identity, and fixed-route future-K/V causality. It also records the zero-Value-dispersion counterexample showing that the dispersion heuristic is not an output-error bound.
+The check covers an incomplete final block, Q padding, 28:4 GQA, model scaling, all-exact output and natural-log LSE against dense FP32, a hand-fixed exact+mean mask, all three new selector formulas, V1 block means/proxy scores/threshold selection against independent FP32/PyTorch references, `mean_native`/`fp_v1` mask identity, and fixed-route future-K/V causality. It also records the zero-Value-dispersion counterexample showing that the dispersion heuristic is not an output-error bound.
 
 ## Current execution status and known cost
 
