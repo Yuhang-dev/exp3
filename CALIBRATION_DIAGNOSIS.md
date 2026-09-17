@@ -70,3 +70,17 @@ The saved generations establish a real quality difference but cannot by themselv
 V1 robustness weakness from a local proxy-score/routing implementation divergence. The next required check
 is the updated `check_math.py` V1 block-mean, proxy-score, and exact selection comparison on the RTX 4090,
 followed by the official RULER multi-key/multi-query parity run.
+
+## Scale of the published V1 evaluation
+
+The pinned FlashPrefill RULER configs contain 13 tasks, cap each task at 100 samples, and evaluate six
+lengths from 4K through 128K. Assuming every task file fills the cap, this is 1,300 generations for one
+model/method/length and 7,800 for one model/method across all lengths. Table 4 contains three LLMs and six
+methods, corresponding to a nominal 140,400 RULER generations.
+
+The paper does not publish the total wall-clock duration, repetition/warmup count, or the saved RULER timing
+logs. It reports single-request TTFT on H20 instead. For Qwen2.5-7B at 32K, dense TTFT is 4.735 s and
+FlashPrefill TTFT is 3.534 s. Multiplying those figures by 1,300 gives prefill-only sequential lower bounds
+of about 1.71 h and 1.28 h, respectively; the real quality evaluation also generates 50–100 tokens and adds
+loading, compilation, tokenization, and scoring overhead, so these are not claimed as the authors' actual
+run times.
