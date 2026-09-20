@@ -190,9 +190,11 @@ bash run_final_benchmarks.sh agent
 
 The final LongBench panel keeps 128 generation tokens. The BFCL base panel uses
 1,024 tokens per step, three synchronized prefill repeats, a 20-step limit, and
-native 32K overflow accounting. Interrupted Agent suffixes resume with:
+native 32K overflow accounting. Interrupted runs resume only after validating
+their saved generations and timings as an exact schedule prefix:
 
 ```bash
+bash run_final_benchmarks.sh longbench-resume
 bash run_final_benchmarks.sh agent-resume
 ```
 
