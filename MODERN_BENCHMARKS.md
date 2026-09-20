@@ -95,6 +95,21 @@ Run the deterministic 20-row, involved-class-stratified pilot:
 bash run_modern_benchmarks.sh agent
 ```
 
+If an Agent run is interrupted after complete episode records have already been
+flushed, resume the same output directory with:
+
+```bash
+bash run_modern_benchmarks.sh agent-resume
+```
+
+Resume is accepted only when `generations.jsonl` is an exact prefix of the
+fixed episode/configuration schedule. Completed episodes are not regenerated.
+The failed attempt's metadata and timing file are archived under
+`resume_attempts/`; timing rows from the incomplete episode are removed before
+that episode is restarted. A syntactically valid tool-call JSON object that is
+missing `name` or `arguments` remains a model decode error: its raw text is
+preserved in chat history, but no arguments are invented and no tool is run.
+
 Run all 200 official rows by calling the entry point directly:
 
 ```bash
@@ -161,7 +176,7 @@ BFCL writes:
 | `official_results/` | BFCL-style raw result JSONL separated by configuration |
 | `REPORT.md` | capability gap, trajectory-aware latency, regressions, and recoveries |
 | `rescoring/<tag>/` | derived official-checker snapshot; no model or trajectory rerun |
+| `resume_attempts/<n>/` | immutable failed-attempt metadata/timing snapshot and resume manifest |
 
-No local GPU experiment has been run. The only local checks are Python bytecode
-compilation, shell syntax, prompt-format parity, and an official-checker
-self-test; quality and latency remain remote RTX 4090 work.
+Implementation checks are local and GPU measurements are run only on the remote
+RTX 4090. Current execution status is recorded in `CHECKLIST.md`.

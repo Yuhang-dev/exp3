@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import platform
 import re
+import shutil
 import statistics
 import sys
 import time
@@ -28,7 +29,7 @@ BFCL_VERSION = "2025.12.17"
 BFCL_COMMIT = "f7cf7359b7ac615a0b294831c5ba2bc95ee4a000"
 BFCL_WHEEL_SHA256 = "8555bc9407a56682ceb7d969e87eb724f6b679deb0ef05114d9c6e786406b103"
 BFCL_CATEGORY = "multi_turn_long_context"
-ADAPTER_VERSION = "exp3-qwen25-bfcl-v1-2026-09-20"
+ADAPTER_VERSION = "exp3-qwen25-bfcl-v2-2026-09-20"
 
 
 def arguments():
@@ -60,6 +61,11 @@ def arguments():
     parser.add_argument("--context-limit", type=int, default=32768)
     parser.add_argument("--selector-chunk-tiles", type=int, default=8)
     parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume an interrupted run whose generations form an exact schedule prefix.",
+    )
     parser.add_argument(
         "--out",
         type=Path,
@@ -108,10 +114,11 @@ def write_jsonl_line(output, value):
 
 
 class CsvSink:
-    def __init__(self, path, fields):
-        self.file = Path(path).open("w", newline="", encoding="utf-8")
+    def __init__(self, path, fields, mode="w"):
+        self.file = Path(path).open(mode, newline="", encoding="utf-8")
         self.writer = csv.DictWriter(self.file, fieldnames=fields)
-        self.writer.writeheader()
+        if mode == "w" or self.file.tell() == 0:
+            self.writer.writeheader()
 
     def write(self, row):
         self.writer.writerow({key: row.get(key) for key in self.writer.fieldnames})
@@ -389,20 +396,17 @@ def parse_qwen_response(raw_text):
         parts = raw_text.split("</think>")
         reasoning = parts[0].rstrip("\n").split("<think>")[-1].lstrip("\n")
         cleaned = parts[-1].lstrip("\n")
-    assistant = {
-        "role": "assistant",
-        "content": "" if calls else cleaned,
-    }
-    if calls:
-        assistant["tool_calls"] = calls
-    assistant["reasoning_content"] = reasoning
     try:
         decoded = []
         for call in calls:
             name = call["name"]
+            if not isinstance(name, str):
+                raise TypeError("tool name must be a string")
             arguments = call["arguments"]
             if isinstance(arguments, str):
                 arguments = json.loads(arguments)
+            if not isinstance(arguments, dict):
+                raise TypeError("tool arguments must be an object")
             decoded.append(
                 f"{name}({','.join(f'{key}={repr(value)}' for key, value in arguments.items())})"
             )
@@ -410,6 +414,13 @@ def parse_qwen_response(raw_text):
     except Exception as error:
         decoded = []
         decode_error = f"{type(error).__name__}: {error}"
+    assistant = {
+        "role": "assistant",
+        "content": "" if calls and decode_error is None else cleaned,
+        "reasoning_content": reasoning,
+    }
+    if calls and decode_error is None:
+        assistant["tool_calls"] = calls
     return cleaned, calls, decoded, decode_error, assistant
 
 
@@ -741,7 +752,144 @@ def make_report(folder, quality_rows, episode_rows, timing_rows):
     (folder / "REPORT.md").write_text("\n".join(lines), encoding="utf-8")
 
 
-def run(args, entries, multi_turn_utils, multi_turn_checker, metadata):
+def episode_schedule(entries, candidates):
+    return [
+        (entry, config)
+        for sample_index, entry in enumerate(entries)
+        for config in rotate(candidates, sample_index)
+    ]
+
+
+def write_csv_rows(path, fields, rows):
+    sink = CsvSink(path, fields)
+    for row in rows:
+        sink.write(row)
+    sink.close()
+
+
+def prepare_resume_prefix(folder, schedule, timing_fields, attempt_dir):
+    generations_path = folder / "generations.jsonl"
+    timings_path = folder / "timings.csv"
+    if not generations_path.is_file() or not timings_path.is_file():
+        raise FileNotFoundError("resume requires generations.jsonl and timings.csv")
+
+    shutil.copy2(generations_path, attempt_dir / "generations_before_resume.jsonl")
+    shutil.copy2(timings_path, attempt_dir / "timings_before_resume.csv")
+    records = load_jsonl(generations_path)
+    if len(records) > len(schedule):
+        raise ValueError("saved generations are longer than the requested schedule")
+    expected_keys = [
+        (entry["id"], config["config_id"])
+        for entry, config in schedule
+    ]
+    actual_keys = [(record["id"], record["config_id"]) for record in records]
+    if actual_keys != expected_keys[:len(actual_keys)]:
+        raise ValueError("saved generations are not an exact prefix of the requested schedule")
+    for record, (entry, config) in zip(records, schedule):
+        if record["source_row_sha256"] != entry["source_row_sha256"]:
+            raise ValueError(f"source hash changed for {entry['id']}")
+        if record["method"] != config["method"] or record["alpha"] != config["alpha"]:
+            raise ValueError(f"configuration changed for {entry['id']} / {config['config_id']}")
+
+    with timings_path.open(newline="", encoding="utf-8") as source:
+        timing_rows = list(csv.DictReader(source))
+    complete_keys = set(actual_keys)
+    kept_rows = [
+        row for row in timing_rows
+        if (row["sample_id"], row["config_id"]) in complete_keys
+    ]
+    partial_rows = [
+        row for row in timing_rows
+        if (row["sample_id"], row["config_id"]) not in complete_keys
+    ]
+    counts = {}
+    for row in kept_rows:
+        key = (row["sample_id"], row["config_id"])
+        counts[key] = counts.get(key, 0) + 1
+    for record in records:
+        key = (record["id"], record["config_id"])
+        expected_count = sum(
+            len(step["prefill_ms"])
+            for step in record["steps"]
+            if step["status"] == "generated"
+        )
+        if counts.get(key, 0) != expected_count:
+            raise ValueError(
+                f"timing rows do not match saved episode {record['id']} / "
+                f"{record['config_id']}: {counts.get(key, 0)} != {expected_count}"
+            )
+    if partial_rows:
+        write_csv_rows(attempt_dir / "discarded_partial_timings.csv", timing_fields, partial_rows)
+    timings_temp = timings_path.with_suffix(".resume.tmp")
+    write_csv_rows(timings_temp, timing_fields, kept_rows)
+    timings_temp.replace(timings_path)
+
+    for config_id in sorted({config["config_id"] for _, config in schedule}):
+        path = folder / "official_results" / config_id / "multi_turn"
+        path.mkdir(parents=True, exist_ok=True)
+        with (path / "BFCL_v4_multi_turn_long_context_result.json").open(
+            "w", encoding="utf-8"
+        ) as output:
+            for record in records:
+                if record["config_id"] == config_id:
+                    write_jsonl_line(output, {
+                        "id": record["id"],
+                        "result": record["result"],
+                        "metadata": {
+                            "adapter_version": record["adapter_version"],
+                            "force_terminated": record["force_terminated"],
+                            "termination_reason": record["termination_reason"],
+                        },
+                    })
+
+    next_key = expected_keys[len(records)] if len(records) < len(expected_keys) else None
+    manifest = {
+        "completed_records": len(records),
+        "schedule_records": len(schedule),
+        "kept_timing_rows": len(kept_rows),
+        "discarded_partial_timing_rows": len(partial_rows),
+        "next_episode": next_key,
+        "generations_before_resume_sha256": file_hash(
+            attempt_dir / "generations_before_resume.jsonl"
+        ),
+        "timings_before_resume_sha256": file_hash(
+            attempt_dir / "timings_before_resume.csv"
+        ),
+    }
+    write_json(attempt_dir / "resume_manifest.json", manifest)
+    return records, manifest
+
+
+def run(
+    args,
+    entries,
+    multi_turn_utils,
+    multi_turn_checker,
+    metadata,
+    resume_attempt_dir=None,
+):
+    timing_fields = [
+        "method", "config_id", "alpha", "sample_id", "turn", "step",
+        "prompt_tokens", "prompt_sha256", "repeat", "prefill_ms",
+        "prefill_tokens_s", "peak_allocated_gib", "peak_reserved_gib",
+        "first_token_id",
+    ]
+    candidates = [candidate(method, args.alpha) for method in args.methods]
+    schedule = episode_schedule(entries, candidates)
+    if args.resume:
+        existing_records, resume_manifest = prepare_resume_prefix(
+            args.out,
+            schedule,
+            timing_fields,
+            resume_attempt_dir,
+        )
+        metadata["active_resume"] = resume_manifest
+    else:
+        existing_records = []
+    metadata["completed_episode_prefix"] = len(existing_records)
+    metadata["episode_schedule_size"] = len(schedule)
+    write_json(args.out / "metadata.json", metadata)
+
     backend = AttentionBackend(
         alpha=args.alpha,
         selector_chunk_tiles=args.selector_chunk_tiles,
@@ -759,55 +907,48 @@ def run(args, entries, multi_turn_utils, multi_turn_checker, metadata):
     metadata["gpu"] = gpu_metadata()
     write_json(args.out / "metadata.json", metadata)
 
-    timing_fields = [
-        "method", "config_id", "alpha", "sample_id", "turn", "step",
-        "prompt_tokens", "prompt_sha256", "repeat", "prefill_ms",
-        "prefill_tokens_s", "peak_allocated_gib", "peak_reserved_gib",
-        "first_token_id",
-    ]
-    timing_sink = CsvSink(args.out / "timings.csv", timing_fields)
-    raw_output = (args.out / "generations.jsonl").open("w", encoding="utf-8")
-    candidates = [candidate(method, args.alpha) for method in args.methods]
+    output_mode = "a" if args.resume else "w"
+    timing_sink = CsvSink(args.out / "timings.csv", timing_fields, mode=output_mode)
+    raw_output = (args.out / "generations.jsonl").open(output_mode, encoding="utf-8")
     official_outputs = {}
     for config in candidates:
         path = args.out / "official_results" / config["config_id"] / "multi_turn"
         path.mkdir(parents=True, exist_ok=True)
         official_outputs[config["config_id"]] = (
             path / "BFCL_v4_multi_turn_long_context_result.json"
-        ).open("w", encoding="utf-8")
+        ).open(output_mode, encoding="utf-8")
 
     warmed_shapes = set()
     warmed_generation = set()
     with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
-        for sample_index, entry in enumerate(entries):
-            for config in rotate(candidates, sample_index):
-                print(
-                    f"Agent {config['config_id']:18s} {entry['id']} "
-                    f"turns={len(entry['question'])}",
-                    flush=True,
-                )
-                record = run_episode(
-                    args,
-                    entry,
-                    config,
-                    model,
-                    tokenizer,
-                    backend,
-                    multi_turn_utils,
-                    timing_sink,
-                    warmed_shapes,
-                    warmed_generation,
-                )
-                write_jsonl_line(raw_output, record)
-                write_jsonl_line(official_outputs[config["config_id"]], {
-                    "id": record["id"],
-                    "result": record["result"],
-                    "metadata": {
-                        "adapter_version": ADAPTER_VERSION,
-                        "force_terminated": record["force_terminated"],
-                        "termination_reason": record["termination_reason"],
-                    },
-                })
+        for entry, config in schedule[len(existing_records):]:
+            print(
+                f"Agent {config['config_id']:18s} {entry['id']} "
+                f"turns={len(entry['question'])}",
+                flush=True,
+            )
+            record = run_episode(
+                args,
+                entry,
+                config,
+                model,
+                tokenizer,
+                backend,
+                multi_turn_utils,
+                timing_sink,
+                warmed_shapes,
+                warmed_generation,
+            )
+            write_jsonl_line(raw_output, record)
+            write_jsonl_line(official_outputs[config["config_id"]], {
+                "id": record["id"],
+                "result": record["result"],
+                "metadata": {
+                    "adapter_version": ADAPTER_VERSION,
+                    "force_terminated": record["force_terminated"],
+                    "termination_reason": record["termination_reason"],
+                },
+            })
     timing_sink.close()
     raw_output.close()
     for output in official_outputs.values():
@@ -889,7 +1030,12 @@ def main():
         raise ValueError("alpha must be non-negative")
     if len(args.methods) != len(set(args.methods)):
         raise ValueError("methods must be unique")
-    if args.out.exists() and any(args.out.iterdir()):
+    if args.prepare_only and args.resume:
+        raise ValueError("--prepare-only and --resume cannot be combined")
+    if args.resume:
+        if not args.out.is_dir() or not (args.out / "metadata.json").is_file():
+            raise FileNotFoundError(f"resume output is incomplete or missing: {args.out}")
+    elif args.out.exists() and any(args.out.iterdir()):
         raise FileExistsError(f"refusing to overwrite non-empty output directory: {args.out}")
     args.out.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(args.seed)
@@ -898,8 +1044,39 @@ def main():
     entries, sources, multi_turn_utils, multi_turn_checker = load_bfcl(args)
     if len(entries) != args.samples:
         raise ValueError(f"requested {args.samples} rows, selected {len(entries)}")
+    selected_case_rows = [
+        {
+            "id": entry["id"],
+            "source_row_sha256": entry["source_row_sha256"],
+            "involved_classes": entry["involved_classes"],
+            "turn_count": len(entry["question"]),
+            "question": entry["question"],
+            "ground_truth": entry["ground_truth"],
+        }
+        for entry in entries
+    ]
+    resume_attempt_dir = None
+    previous_metadata = None
+    if args.resume:
+        saved_case_rows = load_jsonl(args.out / "selected_cases.jsonl")
+        if saved_case_rows != selected_case_rows:
+            raise ValueError("saved selected_cases.jsonl does not match the requested cases")
+        previous_metadata = json.loads(
+            (args.out / "metadata.json").read_text(encoding="utf-8")
+        )
+        attempts_root = args.out / "resume_attempts"
+        attempts_root.mkdir(parents=True, exist_ok=True)
+        attempt_number = 1
+        while (attempts_root / f"{attempt_number:03d}").exists():
+            attempt_number += 1
+        resume_attempt_dir = attempts_root / f"{attempt_number:03d}"
+        resume_attempt_dir.mkdir()
+        shutil.copy2(
+            args.out / "metadata.json",
+            resume_attempt_dir / "metadata_before_resume.json",
+        )
     metadata = {
-        "status": "running",
+        "status": "resuming" if args.resume else "running",
         "arguments": {
             key: str(value) if isinstance(value, Path) else value
             for key, value in vars(args).items()
@@ -924,24 +1101,35 @@ def main():
         ),
         "candidates": [candidate(method, args.alpha) for method in args.methods],
     }
+    if previous_metadata is not None:
+        history = list(previous_metadata.get("resume_history", []))
+        history.append({
+            "attempt": len(history) + 1,
+            "resumed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "previous_status": previous_metadata.get("status"),
+            "previous_failure": previous_metadata.get("failure"),
+            "artifact_directory": str(resume_attempt_dir),
+        })
+        metadata["resume_history"] = history
     write_json(args.out / "metadata.json", metadata)
-    with (args.out / "selected_cases.jsonl").open("w", encoding="utf-8") as output:
-        for entry in entries:
-            write_jsonl_line(output, {
-                "id": entry["id"],
-                "source_row_sha256": entry["source_row_sha256"],
-                "involved_classes": entry["involved_classes"],
-                "turn_count": len(entry["question"]),
-                "question": entry["question"],
-                "ground_truth": entry["ground_truth"],
-            })
+    if not args.resume:
+        with (args.out / "selected_cases.jsonl").open("w", encoding="utf-8") as output:
+            for row in selected_case_rows:
+                write_jsonl_line(output, row)
     if args.prepare_only:
         metadata["status"] = "prepared"
         write_json(args.out / "metadata.json", metadata)
         print(f"Prepared {len(entries)} fixed BFCL cases in {args.out}", flush=True)
         return
     try:
-        run(args, entries, multi_turn_utils, multi_turn_checker, metadata)
+        run(
+            args,
+            entries,
+            multi_turn_utils,
+            multi_turn_checker,
+            metadata,
+            resume_attempt_dir=resume_attempt_dir,
+        )
     except Exception as error:
         metadata["status"] = "failed"
         metadata["failure"] = {

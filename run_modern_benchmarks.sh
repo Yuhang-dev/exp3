@@ -82,6 +82,25 @@ run_agent() {
     --out "$AGENT_OUT"
 }
 
+resume_agent() {
+  require_sources
+  test -f "$AGENT_OUT/generations.jsonl" || {
+    echo "No interrupted Agent run found in $AGENT_OUT" >&2
+    exit 1
+  }
+  python -u bfcl_v4_agent.py \
+    --resume \
+    --bfcl-root third_party/bfcl_eval_2025_12_17 \
+    --bfcl-wheel third_party/downloads/bfcl_eval-2025.12.17-py3-none-any.whl \
+    --samples 20 \
+    --selected-cases results/bfcl_v4_long_context_inputs20/selected_cases.jsonl \
+    --methods dense fp_v1 \
+    --alpha 0.08 \
+    --repeats 3 \
+    --max-new-tokens 512 \
+    --out "$AGENT_OUT"
+}
+
 case "$STAGE" in
   download)
     bash ./prepare_modern_benchmarks.sh
@@ -95,12 +114,15 @@ case "$STAGE" in
   agent)
     run_agent
     ;;
+  agent-resume)
+    resume_agent
+    ;;
   all)
     run_longbench
     run_agent
     ;;
   *)
-    echo "Usage: bash run_modern_benchmarks.sh {download|prepare|longbench|agent|all} [longbench_out] [agent_out]" >&2
+    echo "Usage: bash run_modern_benchmarks.sh {download|prepare|longbench|agent|agent-resume|all} [longbench_out] [agent_out]" >&2
     exit 2
     ;;
 esac

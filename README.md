@@ -270,6 +270,10 @@ bash run_modern_benchmarks.sh longbench
 bash run_modern_benchmarks.sh agent
 ```
 
+An interrupted Agent suffix can be continued without regenerating completed
+episodes via `bash run_modern_benchmarks.sh agent-resume`; the runner validates
+the exact saved prefix and archives the failed attempt before continuing.
+
 LongBench v2 uses a deterministic, six-domain-balanced 24-row subset whose
 complete official zero-shot prompts fit Qwen's native 32K context without
 truncation. BFCL V4 uses the official `multi_turn_long_context` data, simulated
