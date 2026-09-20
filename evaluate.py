@@ -7,6 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 import platform
+import shutil
 import subprocess
 import time
 import traceback
@@ -89,6 +90,11 @@ def arguments():
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--inputs", type=Path, help="Reuse a previously saved inputs.pt.")
     parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume an interrupted run whose saved generations are an exact sample prefix.",
+    )
     parser.add_argument("--profile", action="store_true")
     parser.add_argument("--selector-chunk-tiles", type=int, default=8)
     parser.add_argument("--out", type=Path, default=Path("results/quick"))
@@ -138,10 +144,12 @@ def parse_candidates(args):
 
 
 class CsvSink:
-    def __init__(self, path, fields):
-        self.file = path.open("w", newline="", encoding="utf-8")
+    def __init__(self, path, fields, mode="w"):
+        has_content = path.is_file() and path.stat().st_size > 0
+        self.file = path.open(mode, newline="", encoding="utf-8")
         self.writer = csv.DictWriter(self.file, fieldnames=fields)
-        self.writer.writeheader()
+        if mode == "w" or not has_content:
+            self.writer.writeheader()
 
     def write(self, row):
         self.writer.writerow(row)
@@ -194,7 +202,21 @@ def load_or_prepare_inputs(args, tokenizer):
             raise ValueError(f"stored length mismatch for {sample['sample_id']}")
         if input_hash(sample["input_ids"]) != sample["input_sha256"]:
             raise ValueError(f"stored input hash mismatch for {sample['sample_id']}")
-    save_inputs(inputs, args.out)
+    if args.resume:
+        saved_path = args.out / "inputs.pt"
+        if not saved_path.is_file():
+            raise FileNotFoundError(f"resume input snapshot is missing: {saved_path}")
+        saved_inputs = torch.load(saved_path, map_location="cpu", weights_only=False)
+        current_signature = [
+            (sample["sample_id"], sample["input_sha256"]) for sample in inputs
+        ]
+        saved_signature = [
+            (sample["sample_id"], sample["input_sha256"]) for sample in saved_inputs
+        ]
+        if saved_signature != current_signature:
+            raise ValueError("resume inputs differ from the saved input snapshot")
+    else:
+        save_inputs(inputs, args.out)
     return inputs, revisions
 
 
@@ -446,7 +468,145 @@ def write_quality(rows, path):
     sink.close()
 
 
-def run(args, candidates, inputs, metadata):
+def read_jsonl(path):
+    with path.open(encoding="utf-8") as source:
+        return [json.loads(line) for line in source if line.strip()]
+
+
+def write_csv_rows(path, fields, rows):
+    sink = CsvSink(path, fields)
+    for row in rows:
+        sink.write({key: row.get(key) for key in fields})
+    sink.close()
+
+
+def prepare_resume_prefix(
+    args,
+    candidates,
+    inputs,
+    timing_fields,
+    profile_fields,
+    attempt_dir,
+):
+    generations_path = args.out / "generations.jsonl"
+    timings_path = args.out / "timings.csv"
+    profile_path = args.out / "profile.csv"
+    if not generations_path.is_file() or not timings_path.is_file():
+        raise FileNotFoundError("resume requires generations.jsonl and timings.csv")
+
+    for path in (generations_path, timings_path, profile_path):
+        if path.is_file():
+            shutil.copy2(path, attempt_dir / f"{path.stem}_before_resume{path.suffix}")
+
+    records = read_jsonl(generations_path)
+    expected_generation_keys = [
+        (sample["sample_id"], candidate.config_id, sample["input_sha256"])
+        for sample_number, sample in enumerate(inputs)
+        for candidate in rotate(candidates, sample_number)
+    ]
+    actual_generation_keys = [
+        (record["sample_id"], record["config_id"], record["input_sha256"])
+        for record in records
+    ]
+    if actual_generation_keys != expected_generation_keys[:len(actual_generation_keys)]:
+        raise ValueError("saved generations are not an exact prefix of the requested schedule")
+    if len(records) % len(candidates):
+        raise ValueError("resume requires saved generations to end at a sample boundary")
+    completed_samples = len(records) // len(candidates)
+
+    with timings_path.open(newline="", encoding="utf-8") as source:
+        timing_rows = list(csv.DictReader(source))
+    expected_timing_keys = [
+        (sample["sample_id"], candidate.config_id, str(repeat))
+        for sample_number, sample in enumerate(inputs)
+        for repeat in range(args.repeats)
+        for candidate in rotate(candidates, repeat + sample_number)
+    ]
+    actual_timing_keys = [
+        (row["sample_id"], row["config_id"], row["repeat"])
+        for row in timing_rows
+    ]
+    if actual_timing_keys != expected_timing_keys[:len(actual_timing_keys)]:
+        raise ValueError("saved timings are not an exact prefix of the requested schedule")
+    kept_timing_count = completed_samples * args.repeats * len(candidates)
+    if len(timing_rows) < kept_timing_count:
+        raise ValueError("saved timings do not cover every completed generation sample")
+    kept_timing_rows = timing_rows[:kept_timing_count]
+    discarded_timing_rows = timing_rows[kept_timing_count:]
+    if discarded_timing_rows:
+        write_csv_rows(
+            attempt_dir / "discarded_partial_timings.csv",
+            timing_fields,
+            discarded_timing_rows,
+        )
+    write_csv_rows(timings_path, timing_fields, kept_timing_rows)
+
+    profile_rows = []
+    if profile_path.is_file():
+        with profile_path.open(newline="", encoding="utf-8") as source:
+            profile_rows = list(csv.DictReader(source))
+    profiled_groups = {
+        (row["config_id"], row["task"], row["length_label"])
+        for row in profile_rows
+    }
+    manifest = {
+        "completed_samples": completed_samples,
+        "input_samples": len(inputs),
+        "completed_generation_records": len(records),
+        "kept_timing_rows": len(kept_timing_rows),
+        "discarded_partial_timing_rows": len(discarded_timing_rows),
+        "next_sample_id": (
+            inputs[completed_samples]["sample_id"]
+            if completed_samples < len(inputs)
+            else None
+        ),
+        "generations_before_resume_sha256": source_hash(
+            attempt_dir / "generations_before_resume.jsonl"
+        ),
+        "timings_before_resume_sha256": source_hash(
+            attempt_dir / "timings_before_resume.csv"
+        ),
+    }
+    write_metadata(attempt_dir / "resume_manifest.json", manifest)
+    return records, completed_samples, profiled_groups, manifest
+
+
+def run(args, candidates, inputs, metadata, resume_attempt_dir=None):
+    common_fields = [
+        "method", "config_id", "alpha", "task", "split", "length_label",
+        "total_context_budget", "prompt_budget", "actual_tokens", "sample_id", "source_id",
+        "domain", "sub_domain", "difficulty", "source_length_category",
+    ]
+    timing_fields = common_fields + [
+        "repeat", "prefill_ms", "prefill_tokens_s", "peak_allocated_gib",
+        "peak_reserved_gib", "first_token_id",
+    ]
+    profile_fields = common_fields + [
+        "layer", "descriptor_ms", "selector_ms", "indices_ms", "exact_ms",
+        "mean_ms", "merge_ms", "attention_ms", "effective_exact_token_pair_ratio",
+        "exact_token_pairs", "causal_token_pairs", "legacy_block_density",
+        "selected_block_entries", "causal_block_entries", "exact_physical_qk_tiles",
+        "mean_proxy_entries", "selector_proxy_entries", "mean_executed_logit_entries",
+        "mean_executed_value_entries", "selector_executed_dot_entries",
+        "selector_physical_qk_tiles", "q_tile_size", "k_tile_size", "score_k_tile_size",
+    ]
+    if args.resume:
+        generation_records, start_sample, profiled, resume_manifest = prepare_resume_prefix(
+            args,
+            candidates,
+            inputs,
+            timing_fields,
+            profile_fields,
+            resume_attempt_dir,
+        )
+        metadata["active_resume"] = resume_manifest
+    else:
+        generation_records = []
+        start_sample = 0
+        profiled = set()
+    metadata["completed_sample_prefix"] = start_sample
+    write_metadata(args.out / "metadata.json", metadata)
+
     backend = AttentionBackend(alpha=args.alpha, selector_chunk_tiles=args.selector_chunk_tiles)
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
@@ -461,31 +621,14 @@ def run(args, candidates, inputs, metadata):
     metadata["gpu"] = gpu_metadata()
     write_metadata(args.out / "metadata.json", metadata)
 
-    common_fields = [
-        "method", "config_id", "alpha", "task", "split", "length_label",
-        "total_context_budget", "prompt_budget", "actual_tokens", "sample_id", "source_id",
-        "domain", "sub_domain", "difficulty", "source_length_category",
-    ]
-    timing_sink = CsvSink(args.out / "timings.csv", common_fields + [
-        "repeat", "prefill_ms", "prefill_tokens_s", "peak_allocated_gib",
-        "peak_reserved_gib", "first_token_id",
-    ])
-    profile_sink = CsvSink(args.out / "profile.csv", common_fields + [
-        "layer", "descriptor_ms", "selector_ms", "indices_ms", "exact_ms",
-        "mean_ms", "merge_ms", "attention_ms", "effective_exact_token_pair_ratio",
-        "exact_token_pairs", "causal_token_pairs", "legacy_block_density",
-        "selected_block_entries", "causal_block_entries", "exact_physical_qk_tiles",
-        "mean_proxy_entries", "selector_proxy_entries", "mean_executed_logit_entries",
-        "mean_executed_value_entries", "selector_executed_dot_entries",
-        "selector_physical_qk_tiles", "q_tile_size", "k_tile_size", "score_k_tile_size",
-    ])
-    generations = (args.out / "generations.jsonl").open("w", encoding="utf-8")
-    generation_records = []
+    output_mode = "a" if args.resume else "w"
+    timing_sink = CsvSink(args.out / "timings.csv", timing_fields, mode=output_mode)
+    profile_sink = CsvSink(args.out / "profile.csv", profile_fields, mode=output_mode)
+    generations = (args.out / "generations.jsonl").open(output_mode, encoding="utf-8")
     warmed = set()
-    profiled = set()
 
     with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
-        for sample_number, sample in enumerate(inputs):
+        for sample_number, sample in enumerate(inputs[start_sample:], start=start_sample):
             input_ids = torch.tensor([sample["input_ids"]], dtype=torch.long, device="cuda")
             key = sample_key(sample)
             for candidate in candidates:
@@ -613,6 +756,7 @@ def run(args, candidates, inputs, metadata):
     predictions.close()
     write_quality(quality_rows, args.out / "quality.csv")
     metadata["status"] = "complete"
+    metadata.pop("failure", None)
     metadata["completed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     write_metadata(args.out / "metadata.json", metadata)
     from report import make_report
@@ -635,6 +779,15 @@ def main():
         raise ValueError("longbench-v2-min-tokens must be positive")
     if args.alpha < 0:
         raise ValueError("alpha must be non-negative")
+    if args.prepare_only and args.resume:
+        raise ValueError("--prepare-only and --resume cannot be combined")
+    previous_metadata = None
+    resume_attempt_dir = None
+    if args.resume:
+        metadata_path = args.out / "metadata.json"
+        if not metadata_path.is_file():
+            raise FileNotFoundError(f"resume metadata is missing: {metadata_path}")
+        previous_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     args.out.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(args.seed)
     torch.set_num_threads(1)
@@ -642,6 +795,43 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     inputs, revisions = load_or_prepare_inputs(args, tokenizer)
     metadata = base_metadata(args, candidates, inputs, revisions)
+    if previous_metadata is not None:
+        if previous_metadata["candidates"] != metadata["candidates"]:
+            raise ValueError("resume candidates differ from the interrupted run")
+        if previous_metadata["input_count"] != metadata["input_count"]:
+            raise ValueError("resume input count differs from the interrupted run")
+        for key in (
+            "model",
+            "split",
+            "tasks",
+            "max_new_tokens",
+            "repeats",
+            "profile",
+            "selector_chunk_tiles",
+        ):
+            if previous_metadata["arguments"].get(key) != metadata["arguments"].get(key):
+                raise ValueError(f"resume argument changed: {key}")
+        attempts_root = args.out / "resume_attempts"
+        attempts_root.mkdir(parents=True, exist_ok=True)
+        attempt_number = 1
+        while (attempts_root / f"{attempt_number:03d}").exists():
+            attempt_number += 1
+        resume_attempt_dir = attempts_root / f"{attempt_number:03d}"
+        resume_attempt_dir.mkdir()
+        shutil.copy2(
+            args.out / "metadata.json",
+            resume_attempt_dir / "metadata_before_resume.json",
+        )
+        history = list(previous_metadata.get("resume_history", []))
+        history.append({
+            "attempt": len(history) + 1,
+            "resumed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "previous_status": previous_metadata.get("status"),
+            "previous_failure": previous_metadata.get("failure"),
+            "artifact_directory": str(resume_attempt_dir),
+        })
+        metadata["status"] = "resuming"
+        metadata["resume_history"] = history
     write_metadata(args.out / "metadata.json", metadata)
     write_metadata(args.out / "scorer_manifest.json", {
         **metadata["scoring"],
@@ -651,7 +841,13 @@ def main():
         print(f"Prepared {len(inputs)} fixed inputs in {args.out}", flush=True)
         return
     try:
-        run(args, candidates, inputs, metadata)
+        run(
+            args,
+            candidates,
+            inputs,
+            metadata,
+            resume_attempt_dir=resume_attempt_dir,
+        )
     except Exception as error:
         metadata["status"] = "failed"
         metadata["failure"] = {

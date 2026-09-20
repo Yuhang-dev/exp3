@@ -68,6 +68,25 @@ run_longbench() {
     --out "$LONGBENCH_OUT"
 }
 
+resume_longbench() {
+  require_sources
+  test -f "$LONGBENCH_OUT/generations.jsonl" || {
+    echo "No interrupted LongBench run found in $LONGBENCH_OUT" >&2
+    exit 1
+  }
+  HF_HUB_OFFLINE=1 python -u evaluate.py \
+    --resume \
+    --inputs "$LONGBENCH_INPUTS/inputs.pt" \
+    --split modern \
+    --tasks longbench_v2 \
+    --methods dense fp_v1 \
+    --alpha 0.08 \
+    --max-new-tokens 128 \
+    --repeats 3 \
+    --profile \
+    --out "$LONGBENCH_OUT"
+}
+
 run_agent() {
   require_sources
   test -f "$AGENT_INPUTS/selected_cases.jsonl" || {
@@ -114,6 +133,9 @@ case "$STAGE" in
   longbench)
     run_longbench
     ;;
+  longbench-resume)
+    resume_longbench
+    ;;
   agent)
     run_agent
     ;;
@@ -126,7 +148,7 @@ case "$STAGE" in
     run_agent
     ;;
   *)
-    echo "Usage: bash run_final_benchmarks.sh {prepare|longbench|agent|agent-resume|all} [longbench_out] [agent_out]" >&2
+    echo "Usage: bash run_final_benchmarks.sh {prepare|longbench|longbench-resume|agent|agent-resume|all} [longbench_out] [agent_out]" >&2
     exit 2
     ;;
 esac
