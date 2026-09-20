@@ -43,6 +43,7 @@ class AttentionBackend:
         self.selector_chunk_tiles = selector_chunk_tiles
         self.record = False
         self.profile_records = []
+        self.capture_callback = None
         ALL_ATTENTION_FUNCTIONS["sdpa"] = self.forward
 
     def configure(self, method: str, alpha: float | None = None):
@@ -63,7 +64,9 @@ class AttentionBackend:
         record["events"][name] = (start, end)
         return result
 
-    def _v1_selection(self, q, k, scale, record, descriptors_needed):
+    def _v1_selection(
+        self, q, k, scale, record, descriptors_needed, return_auxiliary=False
+    ):
         def descriptor_work():
             descriptors = kernels.block_descriptors(k, descriptors_needed, self.block_size) \
                 if isinstance(descriptors_needed, torch.Tensor) else None
@@ -90,6 +93,8 @@ class AttentionBackend:
             return indices, counts, selected
 
         indices, counts, selected = self._stage(record, "indices", index_work)
+        if return_auxiliary:
+            return descriptors, mean_k, scores, indices, counts, selected
         return descriptors, indices, counts, selected
 
     def _new_selection(self, q, k, v, scale, record):
@@ -197,15 +202,21 @@ class AttentionBackend:
             k = key.transpose(1, 2).contiguous()
             v = value.transpose(1, 2).contiguous()
             scale = float(scaling)
+            capture_v1 = self.capture_callback is not None and self.method == "fp_v1"
             if self.method in {"fp_v1", "mean_native"}:
                 descriptor_value = v if self.method == "mean_native" else None
-                descriptors, indices, counts, selected = self._v1_selection(
+                selection = self._v1_selection(
                     q,
                     k,
                     scale,
                     record,
                     descriptor_value,
+                    return_auxiliary=capture_v1,
                 )
+                if capture_v1:
+                    descriptors, mean_k, scores, indices, counts, selected = selection
+                else:
+                    descriptors, indices, counts, selected = selection
             else:
                 descriptors, indices, counts, selected = self._new_selection(
                     q,
@@ -213,6 +224,20 @@ class AttentionBackend:
                     v,
                     scale,
                     record,
+                )
+
+            if capture_v1:
+                self.capture_callback(
+                    layer=int(module.layer_idx),
+                    q=q,
+                    k=k,
+                    v=v,
+                    mean_k=mean_k,
+                    scores=scores,
+                    indices=indices,
+                    counts=counts,
+                    selected=selected,
+                    scale=scale,
                 )
 
             exact_output, exact_lse = self._stage(
@@ -280,6 +305,13 @@ class AttentionBackend:
     def start_profile(self):
         self.profile_records.clear()
         self.record = True
+
+    def start_capture(self, callback):
+        """Attach a synchronous V1-prefill diagnostic callback."""
+        self.capture_callback = callback
+
+    def finish_capture(self):
+        self.capture_callback = None
 
     def finish_profile(self):
         self.record = False

@@ -1,6 +1,6 @@
 # exp3 implementation checklist
 
-Last updated: 2026-09-17
+Last updated: 2026-09-20
 
 Status legend: `[x]` complete, `[~]` in progress, `[ ]` pending, `[!]` blocked/failed.
 
@@ -69,9 +69,29 @@ Status legend: `[x]` complete, `[~]` in progress, `[ ]` pending, `[!]` blocked/f
   - [x] Retain all four mean-corrected methods in the alpha sweep by user decision, including `cgf_mean` and `dispersion_mean`, so their initial `alpha=0.08` ranking can be checked across thresholds and actual densities.
   - [x] Restrict the sweep to the discriminating 32K synthetic calibration set and freeze the 14 configurations in `focused_sweep_candidates.json` (dense, V1, and three alpha values for each mean-corrected method).
   - [x] Audit the apparent HotpotQA `dispersion_mean` gain: all +3.57 aggregate points come from one of eight calibration samples (0 to 28.57), while the other seven dense/dispersion pairs are unchanged. Preserve it as a candidate signal for the 16-sample disjoint holdout, not as a stable gain or an alpha-tuning target.
-  - [ ] Remote: run `bash run_pilot.sh sweep results/calibration_sweep_32k`.
+  - [x] Remote: run `bash run_pilot.sh sweep results/calibration_sweep_32k` (completed 2026-09-17; archive audited 2026-09-18).
+  - [x] Preserve the original sweep archive and audit all 112 raw generations, 336 timing repeats, and 784 profile rows. Offline rescoring changes 0 scores; independent aggregation reproduces all 28 summary rows. The eight old input hashes and all 48 common-config outputs match the prior calibration. See `SWEEP_32K_AUDIT.md`.
+  - [x] Record the full alpha-dependent CGF/dispersion signal and per-sample failures without pruning either branch: both reach 100 on multi-key at alpha=0.04, while the best sparse multi-query score remains 91.67 from mean-native/balanced. This remains an eight-input custom calibration, not an expanded RULER run.
   - [ ] Select and freeze configurations from the sweep without consulting holdout scores.
   - [ ] Remote: run the disjoint 16K/32K synthetic plus HotpotQA holdout with the frozen file.
+
+## Phase 6 — V1 block-structure diagnosis
+
+- [x] Add a disabled-by-default V1 capture callback without changing the normal benchmark path.
+- [x] Save token-level projected K both before RoPE and after RoPE, plus the exact BF16 V1 Mean Pool result.
+- [x] Save lossless FP32 block first/second moments and compact within-block sequence/coherence features while retaining raw K for later spectra, clustering, and prototype analysis.
+- [x] Recompute full causal token-level attention in bounded query chunks and aggregate it after softmax into block-level truth.
+- [x] Preserve per-row and query-tile Mean Pool approximation evidence: Jensen gap, logit spread, exact/proxy aggregated log mass, and normalized V1 score parity.
+- [x] Save V1 proxy scores, selected/protected/routed masks, exact indices/counts, and a protected same-budget dense oracle.
+- [x] Save per-query-row retained attention mass and dense-vs-selected output error; keep Q, V, row-by-block mass, and output vectors as explicit archival options.
+- [x] Join intrinsic block features, selection/miss statistics, and output errors into per-block, per-tile, and per-layer CSV summaries.
+- [x] Preserve exact input IDs, token/block text mapping, source hashes, run state, artifact inventory, and a non-overwrite output contract.
+- [x] Document a two-sample rich discovery stage and an eight-sample lightweight confirmation stage so the earlier small-sample mistake is not repeated.
+- [x] Run local Python bytecode compilation for the capture path (PASS on 2026-09-20); no local CUDA/model run performed.
+- [ ] Remote: run a short 4K, one-layer smoke capture and inspect tensor shapes/probability sums/output-error sanity.
+- [ ] Remote: capture one 32K multi-key and one 32K multi-query sample with Q/V archived and five layers of row-by-block mass.
+- [ ] Analyze block structure before specifying a new selector; treat the two rich samples as hypothesis formation only.
+- [ ] Confirm any structural relation separately across all eight calibration inputs and then on saved RULER inputs before claiming generality.
 
 ## Progress log
 
@@ -94,3 +114,5 @@ Status legend: `[x]` complete, `[~]` in progress, `[ ]` pending, `[!]` blocked/f
 - 2026-09-17: user accepted the 20-sample-per-task parity evidence as sufficient for the present diagnostic and chose not to spend GPU time on the 100-sample expansion. The parity phase is closed: it supports a small paper-like V1 quality delta and rules out a scorer-only explanation for the custom-task collapse, but is not labeled a formal non-inferiority result. Candidate selection and holdout are the next phase.
 - 2026-09-17: configured the focused P1b continuation on only the eight discriminating 32K synthetic calibration inputs, removing saturated 16K and non-discriminating HotpotQA repeats. By user decision, the sweep retains `mean_native`, `mean_balanced`, `cgf_mean`, and `dispersion_mean` at `alpha={0.04,0.08,0.16}`, plus dense and V1 references: 14 configurations and 112 scored generations in total.
 - 2026-09-17: re-audited the tentative HotpotQA dispersion signal before pruning. Its +3.57 aggregate change is caused by one calibration sample improving from 0 to 28.57; the other seven paired scores do not change. `dispersion_mean` therefore stays in the 32K alpha sweep, while the real-task signal is reserved for confirmation on the 16 unseen HotpotQA holdout examples after configuration freeze.
+- 2026-09-18: preserved and audited `calibration_sweep_32k.tar.gz` (SHA256 `B5C2DC0105D0B0ACF42D46D7BBD2A06CAF4AB0551B55069E52C1FD7409CE8FAB`). The completed 14-configuration sweep contains eight unchanged calibration inputs and 112 generations; all raw/stored scores agree, all 28 quality/timing summaries reproduce, and the 48 common-config outputs match the prior calibration verbatim. CGF:0.04 scores 100/75 and dispersion:0.04 scores 100/66.67 on multi-key/multi-query, versus mean_native:0.04 at 83.33/91.67; dispersion:0.08 scores 75/75 and dispersion:0.16 scores 83.33/58.33. No sparse candidate matches dense on both tasks. The 89 failed config-target judgments are wrong values or misbindings, not parser omissions or max-token endings. CGF/dispersion at 0.04 remain about 8%/11% slower than dense in the current implementation. Full results, density/profile costs, hashes, and proposed holdout candidates are recorded in `SWEEP_32K_AUDIT.md`; selection/freeze and remote holdout remain pending.
+- 2026-09-20: added the V1-only structural capture path. It distinguishes pre-RoPE content K from the post-RoPE K actually mean-pooled by V1, stores dense block-mass truth and exact selected-mask consequences, and optionally archives Q/V for offline method work. The capture never enters benchmark timing. Local compilation passed; remote 4K smoke and 32K captures remain pending.

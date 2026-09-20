@@ -133,6 +133,11 @@ explicit experiment decision so their ranking can be checked across thresholds a
 bash run_pilot.sh sweep results/calibration_sweep_32k
 ```
 
+The completed 32K sweep is audited in [SWEEP_32K_AUDIT.md](SWEEP_32K_AUDIT.md), including
+all alpha results, per-target failures, measured latency/density, and preserved artifact hashes.
+All 112 saved generations rescore unchanged. This is still the same eight custom calibration
+inputs, not an expanded RULER evaluation; holdout selection/freeze remains pending.
+
 The exact candidate list is frozen in `focused_sweep_candidates.json`. For a different candidate
 set, call the CLI explicitly with repeated entries such as:
 
@@ -228,6 +233,29 @@ scores and predictions.
 
 The completed 20-sample-per-task 32K pilot, artifact hashes, paired failures, and interpretation are
 recorded in [RULER_PILOT_AUDIT.md](RULER_PILOT_AUDIT.md).
+
+## 9. V1 block-structure diagnostics
+
+`v1_block_diagnostics.py` is a V1-only, non-timed capture path. It saves raw
+pre-/post-RoPE K, the actual V1 mean pool and routing state, dense token-attention
+block truth, per-row retained mass, and dense-vs-selected output error. Optional
+Q, V, row-by-block mass, and output vectors let later hypotheses be tested
+offline without another model forward.
+
+```bash
+bash run_v1_block_diagnostics.sh \
+  results/calibration_sweep_32k/inputs.pt \
+  synthetic-calibration-32768-0-multi_key \
+  results/v1_blocks_32k/multi_key_0 \
+  --save-q-layers all \
+  --save-v-layers all \
+  --save-row-block-mass-layers 0 7 14 21 27
+```
+
+The artifact definitions, storage estimates, second multi-query command, and
+multi-sample validation stage are in
+[V1_BLOCK_DIAGNOSTICS.md](V1_BLOCK_DIAGNOSTICS.md). These diagnostic runtimes
+must not enter `prefill_ms`.
 
 ## Output contract
 
