@@ -106,7 +106,9 @@ Resume is accepted only when `generations.jsonl` is an exact prefix of the
 fixed episode/configuration schedule. Completed episodes are not regenerated.
 The failed attempt's metadata and timing file are archived under
 `resume_attempts/`; timing rows from the incomplete episode are removed before
-that episode is restarted. A syntactically valid tool-call JSON object that is
+that episode is restarted. The wrapper uses the already populated local model
+cache in Hub offline mode so a resume cannot stall on a metadata HEAD request.
+A syntactically valid tool-call JSON object that is
 missing `name` or `arguments` remains a model decode error: its raw text is
 preserved in chat history, but no arguments are invented and no tool is run.
 

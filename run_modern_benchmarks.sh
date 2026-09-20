@@ -88,7 +88,7 @@ resume_agent() {
     echo "No interrupted Agent run found in $AGENT_OUT" >&2
     exit 1
   }
-  python -u bfcl_v4_agent.py \
+  HF_HUB_OFFLINE=1 python -u bfcl_v4_agent.py \
     --resume \
     --bfcl-root third_party/bfcl_eval_2025_12_17 \
     --bfcl-wheel third_party/downloads/bfcl_eval-2025.12.17-py3-none-any.whl \
