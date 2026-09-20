@@ -157,6 +157,30 @@ def make_report(folder):
     summary = summary.sort_values(["task", "length_label", "score", "prefill_ms"], ascending=[True, True, False, True])
     summary.to_csv(folder / "summary.csv", index=False)
 
+    domain_summary = None
+    if "domain" in quality.columns and quality["domain"].notna().any():
+        domain_group = ["task", "length_label", "domain", "method", "config_id"]
+        domain_quality = quality[quality["domain"].notna()].groupby(
+            domain_group,
+            dropna=False,
+        ).agg(
+            quality_samples=("sample_id", "nunique"),
+            score=("score", "mean"),
+            delta_vs_dense=("delta_vs_dense", "mean"),
+        ).reset_index()
+        sample_domains = quality[["sample_id", "domain"]].dropna().drop_duplicates()
+        domain_timing_samples = timing_sample.merge(sample_domains, on="sample_id", how="inner")
+        domain_timing = domain_timing_samples.groupby(domain_group, dropna=False).agg(
+            prefill_ms=("prefill_ms", "median"),
+            paired_speedup_vs_dense=("paired_speedup_vs_dense", "median"),
+        ).reset_index()
+        domain_summary = domain_quality.merge(domain_timing, on=domain_group, how="left")
+        domain_summary = domain_summary.sort_values(
+            ["task", "domain", "score", "prefill_ms"],
+            ascending=[True, True, False, True],
+        )
+        domain_summary.to_csv(folder / "domain_summary.csv", index=False)
+
     groups = list(summary.groupby(["task", "length_label"], dropna=False))
     columns = min(2, len(groups))
     rows = int(np.ceil(len(groups) / columns))
@@ -213,6 +237,29 @@ def make_report(folder):
             f"{row.score:.2f} | {delta} | {row.prefill_ms:.1f} | {speedup} | "
             f"{row.peak_allocated_gib:.2f} | {exact_ratio} | {mean_name} | {mean_speedup} |"
         )
+
+    if domain_summary is not None:
+        lines += [
+            "",
+            "## Domain breakdown",
+            "",
+            "该表只拆分同一 benchmark 内的 domain，不把不同 domain 的原始分数另行混合。",
+            "",
+            "| Task | Domain | Config | n | Score | Δ dense | Prefill ms | Paired speedup |",
+            "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
+        ]
+        for row in domain_summary.itertuples():
+            delta = "—" if pd.isna(row.delta_vs_dense) else f"{row.delta_vs_dense:+.2f}"
+            speedup = (
+                "—"
+                if pd.isna(row.paired_speedup_vs_dense)
+                else f"{row.paired_speedup_vs_dense:.2f}×"
+            )
+            lines.append(
+                f"| {row.task} | {row.domain} | {row.config_id} | "
+                f"{int(row.quality_samples)} | {row.score:.2f} | {delta} | "
+                f"{row.prefill_ms:.1f} | {speedup} |"
+            )
 
     if profile is not None:
         lines += [

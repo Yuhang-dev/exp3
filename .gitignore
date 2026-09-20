@@ -1,5 +1,7 @@
 __pycache__/
 *.py[cod]
 results/
+datasets/
+third_party/
 *.pt
 .DS_Store

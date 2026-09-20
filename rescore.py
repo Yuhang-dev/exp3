@@ -14,7 +14,8 @@ from scoring import SCORER_VERSION, score_prediction
 QUALITY_FIELDS = [
     "method", "config_id", "alpha", "task", "split", "length_label",
     "total_context_budget", "prompt_budget", "actual_tokens", "sample_id",
-    "source_id", "metric", "scorer_version", "score", "delta_vs_dense",
+    "source_id", "domain", "sub_domain", "difficulty", "source_length_category",
+    "metric", "scorer_version", "score", "delta_vs_dense",
     "exact_match", "target_accuracy", "all_target_em", "raw_substring_score",
     "normalized_substring_score", "parsed_answer", "stored_score", "score_changed",
 ]
@@ -45,11 +46,13 @@ def numeric_score(value):
 
 
 def sample_key(sample):
-    length_label = (
-        str(sample["total_context_budget"])
-        if sample["task"] in ("synthetic_kv_retrieval", "ruler")
-        else "actual"
-    )
+    length_label = sample.get("length_label")
+    if length_label is None:
+        length_label = (
+            str(sample["total_context_budget"])
+            if sample["task"] in ("synthetic_kv_retrieval", "ruler")
+            else "actual"
+        )
     return {
         "task": sample["task_label"],
         "split": sample["split"],
@@ -59,6 +62,10 @@ def sample_key(sample):
         "actual_tokens": sample["actual_tokens"],
         "sample_id": sample["sample_id"],
         "source_id": sample["source_id"],
+        "domain": sample.get("domain"),
+        "sub_domain": sample.get("sub_domain"),
+        "difficulty": sample.get("difficulty"),
+        "source_length_category": sample.get("source_length_category"),
     }
 
 

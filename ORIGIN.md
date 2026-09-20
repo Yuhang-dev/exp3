@@ -47,3 +47,37 @@ Exp3 uses the official hotpotqa prompt, 32-token generation cap, normalized toke
 - Files: `niah_multikey_{1,2,3}/validation_32768.jsonl` and `niah_multiquery/validation_32768.jsonl`.
 
 Exp3 rebuilds the prompt from `context`, `query`, and `type_needle_v` with the pinned runtime template instead of using the dataset's pre-rendered `input` field. Those strings differ at the separator before the completion prefix (runtime template newline versus stored-input space). It mirrors the official seeded dataset shuffle, no-chat tokenization/truncation, task-specific 50/100-token generation limits, final-prompt-token generation boundary, and case-insensitive answer-substring recall. Per-run metadata records the repository revisions, full source-file hashes, selected source rows and row hashes; `inputs.jsonl` and `inputs.pt` retain the exact rebuilt prompt and input IDs used by the model.
+
+## LongBench v2 native-32K subset
+
+- Dataset: `THUDM/LongBench-v2`, pinned HF revision
+  `2b48e494f2c7a2f0af81aae178e05c7e1dde0fe9`, file `data.json`.
+- Data SHA256:
+  `15d61c22d92c96900b3c4948b6aeea218d3214b676a65df48e7b8555604c7fe2`.
+- Prompt/scorer source: `THUDM/LongBench`, commit
+  `2e00731f8d0bff23dc4325161044d0ed8af94c1e`, files
+  `prompts/0shot.txt` and `pred.py`.
+
+Exp3 uses the complete official zero-shot prompt wrapped in the Qwen chat
+template, exact extracted A/B/C/D accuracy, and no prompt truncation. Because
+Qwen is held at its native 32K context, the reported task is explicitly a
+deterministic token-filtered subset rather than the official 503-row overall
+score. Exp3 also keeps its common greedy paired decoding rather than the
+upstream script's temperature-0.1 request.
+
+## BFCL V4 agent subset
+
+- Package: `bfcl-eval==2025.12.17`, wheel SHA256
+  `8555bc9407a56682ceb7d969e87eb724f6b679deb0ef05114d9c6e786406b103`.
+- Reproduction/leaderboard commit:
+  `f7cf7359b7ac615a0b294831c5ba2bc95ee4a000`.
+- Data: `BFCL_v4_multi_turn_long_context.json` and its official
+  `possible_answer` file; the package contains 200 entries.
+- Evaluation: official executable backends and `multi_turn_checker` from the
+  extracted pinned wheel.
+
+The official package does not register this exact Qwen2.5-7B-Instruct model as
+a built-in handler. `bfcl_v4_agent.py` therefore provides a project adapter that
+mirrors the package's Qwen `<tool_call>` protocol. The raw data, backend, and
+checker remain official and pinned; the resulting comparison is not labeled an
+official BFCL leaderboard submission.

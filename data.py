@@ -1,4 +1,4 @@
-"""Deterministic synthetic, LongBench hotpotqa, and pinned RULER inputs."""
+"""Deterministic synthetic, LongBench, and pinned RULER inputs."""
 
 import hashlib
 import json
@@ -12,6 +12,9 @@ from huggingface_hub import hf_hub_download
 
 LONGBENCH_REPO = "zai-org/LongBench"
 LONGBENCH_CODE_COMMIT = "2e00731f8d0bff23dc4325161044d0ed8af94c1e"
+LONGBENCH_V2_REPO = "THUDM/LongBench-v2"
+LONGBENCH_V2_REVISION = "2b48e494f2c7a2f0af81aae178e05c7e1dde0fe9"
+LONGBENCH_V2_DATA_SHA256 = "15d61c22d92c96900b3c4948b6aeea218d3214b676a65df48e7b8555604c7fe2"
 RULER_REPO = "aldjalkdf/ruler"
 RULER_REVISION = "2a9d66ecfcdbcaa72d692b6e89d1fb3325e7d634"
 RULER_FLASH_PREFILL_COMMIT = "baa612047433a992a00d07dc178205eed065ae14"
@@ -44,6 +47,21 @@ HOTPOT_PROMPT = (
     "Answer the question based on the given passages. Only give me the answer and do not output any other words.\n\n"
     "Question: {input}\nAnswer:"
 )
+LONGBENCH_V2_PROMPT = """Please read the following text and answer the question below.
+
+<text>
+$DOC$
+</text>
+
+What is the correct answer to this question: $Q$
+Choices:
+(A) $C_A$
+(B) $C_B$
+(C) $C_C$
+(D) $C_D$
+
+Format your response as follows: \"The correct answer is (insert answer here)\".
+"""
 
 
 def input_hash(token_ids):
@@ -492,6 +510,169 @@ def prepare_hotpotqa(tokenizer, split, seed, samples, max_new_tokens, native_lim
     return inputs, _archive_revision(archive)
 
 
+def _longbench_v2_prompt(row):
+    replacements = {
+        "$DOC$": row["context"].strip(),
+        "$Q$": row["question"].strip(),
+        "$C_A$": row["choice_A"].strip(),
+        "$C_B$": row["choice_B"].strip(),
+        "$C_C$": row["choice_C"].strip(),
+        "$C_D$": row["choice_D"].strip(),
+    }
+    prompt = LONGBENCH_V2_PROMPT
+    for marker, value in replacements.items():
+        prompt = prompt.replace(marker, value)
+    return prompt
+
+
+def _balanced_longbench_v2_candidates(candidates, samples):
+    by_domain = {}
+    for order, row, prepared in candidates:
+        by_domain.setdefault(str(row["domain"]), []).append((order, row, prepared))
+    for rows in by_domain.values():
+        rows.sort(key=lambda item: item[0])
+    selected = []
+    position = 0
+    domains = sorted(by_domain)
+    while len(selected) < samples:
+        added = False
+        for domain in domains:
+            rows = by_domain[domain]
+            if position < len(rows):
+                selected.append(rows[position])
+                added = True
+                if len(selected) == samples:
+                    break
+        if not added:
+            break
+        position += 1
+    return selected
+
+
+def prepare_longbench_v2(
+    tokenizer,
+    split,
+    seed,
+    samples,
+    max_new_tokens,
+    data_file,
+    min_tokens=16384,
+    native_limit=32768,
+):
+    if split != "modern":
+        raise ValueError("LongBench v2 requires --split modern")
+    path = Path(data_file)
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"LongBench v2 data not found at {path}; run prepare_modern_benchmarks.sh download"
+        )
+    source_sha256 = file_hash(path)
+    if source_sha256 != LONGBENCH_V2_DATA_SHA256:
+        raise ValueError(
+            f"LongBench v2 data hash mismatch: expected {LONGBENCH_V2_DATA_SHA256}, "
+            f"got {source_sha256}"
+        )
+    rows = json.loads(path.read_text(encoding="utf-8"))
+    task_max_new = min(max_new_tokens, 128)
+    max_prompt_tokens = native_limit - task_max_new
+    candidates = []
+    excluded_non_short = 0
+    excluded_too_short = 0
+    excluded_too_long = 0
+    for source_row_index, row in enumerate(rows):
+        if str(row["length"]).lower() != "short":
+            excluded_non_short += 1
+            continue
+        prompt = _longbench_v2_prompt(row)
+        rendered, encoded = _chat_encoding(tokenizer, prompt)
+        token_ids = encoded["input_ids"]
+        if len(token_ids) < min_tokens:
+            excluded_too_short += 1
+            continue
+        if len(token_ids) > max_prompt_tokens:
+            excluded_too_long += 1
+            continue
+        source_id = str(row["_id"])
+        order = hashlib.sha256(f"longbench-v2:{seed}:{source_id}".encode()).hexdigest()
+        source_row_sha256 = hashlib.sha256(
+            json.dumps(row, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        candidates.append((order, row, {
+            "source_row_index": source_row_index,
+            "source_row_sha256": source_row_sha256,
+            "prompt": prompt,
+            "rendered": rendered,
+            "token_ids": token_ids,
+        }))
+    selected = _balanced_longbench_v2_candidates(candidates, samples)
+    if len(selected) != samples:
+        raise ValueError(
+            f"requested {samples} LongBench v2 samples but only {len(candidates)} fit "
+            f"[{min_tokens}, {max_prompt_tokens}] prompt tokens"
+        )
+
+    inputs = []
+    for sample_index, (_, row, prepared) in enumerate(selected):
+        token_ids = prepared["token_ids"]
+        source_id = str(row["_id"])
+        inputs.append({
+            "task": "longbench_v2",
+            "task_label": "LongBench v2 native-32K subset",
+            "variant": "official_0shot",
+            "split": split,
+            "sample_id": f"longbench-v2-{source_id}",
+            "source_id": source_id,
+            "sample_index": sample_index,
+            "seed": seed,
+            "domain": str(row["domain"]),
+            "sub_domain": str(row["sub_domain"]),
+            "difficulty": str(row["difficulty"]),
+            "source_length_category": str(row["length"]),
+            "total_context_budget": native_limit,
+            "prompt_budget": max_prompt_tokens,
+            "length_label": f"{min_tokens // 1024}K-native32K",
+            "actual_tokens": len(token_ids),
+            "question": row["question"],
+            "answers": [str(row["answer"])],
+            "choices": {letter: row[f"choice_{letter}"] for letter in "ABCD"},
+            "expected_format": "The correct answer is (A|B|C|D)",
+            "prompt_text": prepared["prompt"],
+            "rendered_prompt_sha256": hashlib.sha256(
+                prepared["rendered"].encode("utf-8")
+            ).hexdigest(),
+            "source_repository": LONGBENCH_V2_REPO,
+            "source_revision": LONGBENCH_V2_REVISION,
+            "source_file": str(path),
+            "source_file_sha256": source_sha256,
+            "source_row_index": prepared["source_row_index"],
+            "source_row_sha256": prepared["source_row_sha256"],
+            "max_new_tokens": task_max_new,
+            "input_sha256": input_hash(token_ids),
+            "input_ids": token_ids,
+        })
+    revisions = {
+        "repository": LONGBENCH_V2_REPO,
+        "revision": LONGBENCH_V2_REVISION,
+        "data_file_sha256": source_sha256,
+        "code_commit": LONGBENCH_CODE_COMMIT,
+        "prompt": "prompts/0shot.txt",
+        "scorer": "pred.py extract_answer exact A/B/C/D accuracy",
+        "decoding": "project-standard greedy paired decoding; official script uses temperature=0.1",
+        "selection": (
+            "pre-filter official Short (<32K words) rows; tokenize the full official prompt "
+            "with the model chat template; exclude overflow without truncation; deterministic "
+            "hash order round-robin across domain"
+        ),
+        "source_rows": len(rows),
+        "eligible_rows": len(candidates),
+        "excluded_non_short": excluded_non_short,
+        "excluded_too_short": excluded_too_short,
+        "excluded_too_long": excluded_too_long,
+        "selected_ids": [sample["source_id"] for sample in inputs],
+    }
+    return inputs, revisions
+
+
 def prepare_inputs(
     tokenizer,
     tasks,
@@ -504,12 +685,16 @@ def prepare_inputs(
     hotpot_samples,
     ruler_samples,
     max_new_tokens,
+    longbench_v2_samples=None,
+    longbench_v2_file=Path("datasets/longbench_v2/data.json"),
+    longbench_v2_min_tokens=16384,
 ):
     inputs = []
     revisions = {
         "longbench_code_commit": LONGBENCH_CODE_COMMIT,
         "longbench_archive_revision": None,
         "ruler": None,
+        "longbench_v2": None,
     }
     if "synthetic_kv_retrieval" in tasks:
         inputs.extend(prepare_synthetic(
@@ -531,6 +716,18 @@ def prepare_inputs(
         )
         inputs.extend(hotpot)
         revisions["longbench_archive_revision"] = revision
+    if "longbench_v2" in tasks:
+        longbench_v2, longbench_v2_revision = prepare_longbench_v2(
+            tokenizer,
+            split,
+            seed,
+            longbench_v2_samples or samples,
+            max_new_tokens,
+            longbench_v2_file,
+            longbench_v2_min_tokens,
+        )
+        inputs.extend(longbench_v2)
+        revisions["longbench_v2"] = longbench_v2_revision
     ruler_tasks = [task for task in tasks if task in RULER_TASKS]
     if ruler_tasks:
         ruler, ruler_revision = prepare_ruler(

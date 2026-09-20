@@ -259,6 +259,26 @@ must not enter `prefill_ms`. The completed 4K/layer-0 capture gate and its
 integrity/numerical audit are recorded in
 [V1_BLOCK_SMOKE_AUDIT.md](V1_BLOCK_SMOKE_AUDIT.md).
 
+## 10. Modern Full-vs-V1 benchmarks
+
+The modern suite adds a fixed-prompt reasoning benchmark and a stateful agent
+benchmark:
+
+```bash
+bash prepare_modern_benchmarks.sh
+bash run_modern_benchmarks.sh longbench
+bash run_modern_benchmarks.sh agent
+```
+
+LongBench v2 uses a deterministic, six-domain-balanced 24-row subset whose
+complete official zero-shot prompts fit Qwen's native 32K context without
+truncation. BFCL V4 uses the official `multi_turn_long_context` data, simulated
+tool backends, and state checker through a documented Qwen2.5 adapter. BFCL
+reports pure prefill speedup only for dynamic steps whose prompt hashes still
+match after the two methods' trajectories evolve. Pins, exact commands,
+limitations, and output definitions are in
+[MODERN_BENCHMARKS.md](MODERN_BENCHMARKS.md).
+
 ## Output contract
 
 | File | Contents |

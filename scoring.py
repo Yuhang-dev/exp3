@@ -5,7 +5,7 @@ import re
 import string
 
 
-SCORER_VERSION = "exp3-scorers-v3-2026-09-17"
+SCORER_VERSION = "exp3-scorers-v4-2026-09-20"
 
 
 def normalize_answer(text):
@@ -109,6 +109,26 @@ def score_ruler(prediction, answers, scorer_prefix):
     }
 
 
+def score_longbench_v2(prediction, answers):
+    """Mirror LongBench v2 pred.py's exact answer extraction."""
+    response = prediction.replace("*", "")
+    match = re.search(r"The correct answer is \(([A-D])\)", response)
+    if match is None:
+        match = re.search(r"The correct answer is ([A-D])", response)
+    parsed = match.group(1) if match is not None else None
+    expected = str(answers[0])
+    correct = float(parsed == expected)
+    return {
+        "metric": "longbench_v2_official_accuracy",
+        "scorer_version": SCORER_VERSION,
+        "score": 100.0 * correct,
+        "exact_match": correct,
+        "parsed_answer": parsed,
+        "target_accuracy": correct,
+        "all_target_em": correct,
+    }
+
+
 def score_prediction(sample, prediction):
     if sample["task"] == "synthetic_kv_retrieval":
         return score_synthetic(prediction, sample["answers"], sample["target_keys"])
@@ -116,4 +136,6 @@ def score_prediction(sample, prediction):
         return score_hotpotqa(prediction, sample["answers"])
     if sample["task"] == "ruler":
         return score_ruler(prediction, sample["answers"], sample["scorer_prefix"])
+    if sample["task"] == "longbench_v2":
+        return score_longbench_v2(prediction, sample["answers"])
     raise ValueError(f"unsupported task: {sample['task']}")

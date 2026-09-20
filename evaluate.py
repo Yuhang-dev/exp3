@@ -43,14 +43,14 @@ def arguments():
     parser.add_argument("--config", type=Path, help="JSON file containing a candidates list.")
     parser.add_argument(
         "--split",
-        choices=("quick", "calibration", "holdout", "ruler"),
+        choices=("quick", "calibration", "holdout", "ruler", "modern"),
         default="quick",
     )
     parser.add_argument(
         "--tasks",
         "--task",
         nargs="+",
-        choices=("synthetic_kv_retrieval", "hotpotqa", *RULER_TASKS),
+        choices=("synthetic_kv_retrieval", "hotpotqa", "longbench_v2", *RULER_TASKS),
         default=["synthetic_kv_retrieval"],
     )
     parser.add_argument(
@@ -71,6 +71,18 @@ def arguments():
     parser.add_argument("--synthetic-samples", type=int)
     parser.add_argument("--hotpot-samples", type=int)
     parser.add_argument("--ruler-samples", type=int, help="Samples per selected RULER task and length.")
+    parser.add_argument("--longbench-v2-samples", type=int)
+    parser.add_argument(
+        "--longbench-v2-file",
+        type=Path,
+        default=Path("datasets/longbench_v2/data.json"),
+    )
+    parser.add_argument(
+        "--longbench-v2-min-tokens",
+        type=int,
+        default=16384,
+        help="Minimum model-tokenized prompt length for the native-32K subset.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--alpha", type=float, default=0.08)
     parser.add_argument("--max-new-tokens", type=int, default=128)
@@ -168,6 +180,9 @@ def load_or_prepare_inputs(args, tokenizer):
             args.hotpot_samples,
             args.ruler_samples,
             args.max_new_tokens,
+            args.longbench_v2_samples,
+            args.longbench_v2_file,
+            args.longbench_v2_min_tokens,
         )
     stored_splits = {sample["split"] for sample in inputs}
     if stored_splits != {args.split}:
@@ -256,6 +271,13 @@ def base_metadata(args, candidates, inputs, revisions):
             ),
             "ruler_scorer": (
                 "case-insensitive answer substring recall from the same pinned load_ruler"
+            ),
+            "longbench_v2_prompt": (
+                "THUDM/LongBench-v2 prompts/0shot.txt at "
+                "2e00731f8d0bff23dc4325161044d0ed8af94c1e"
+            ),
+            "longbench_v2_scorer": (
+                "THUDM/LongBench-v2 pred.py exact extracted A/B/C/D accuracy"
             ),
         },
     }
@@ -373,11 +395,13 @@ def profile_prefill(model, backend, input_ids):
 
 
 def sample_key(sample):
-    length_label = (
-        str(sample["total_context_budget"])
-        if sample["task"] in ("synthetic_kv_retrieval", "ruler")
-        else "actual"
-    )
+    length_label = sample.get("length_label")
+    if length_label is None:
+        length_label = (
+            str(sample["total_context_budget"])
+            if sample["task"] in ("synthetic_kv_retrieval", "ruler")
+            else "actual"
+        )
     return {
         "task": sample["task_label"],
         "split": sample["split"],
@@ -387,6 +411,10 @@ def sample_key(sample):
         "actual_tokens": sample["actual_tokens"],
         "sample_id": sample["sample_id"],
         "source_id": sample["source_id"],
+        "domain": sample.get("domain"),
+        "sub_domain": sample.get("sub_domain"),
+        "difficulty": sample.get("difficulty"),
+        "source_length_category": sample.get("source_length_category"),
     }
 
 
@@ -407,7 +435,8 @@ def write_quality(rows, path):
     fields = [
         "method", "config_id", "alpha", "task", "split", "length_label",
         "total_context_budget", "prompt_budget", "actual_tokens", "sample_id",
-        "source_id", "metric", "scorer_version", "score", "delta_vs_dense",
+        "source_id", "domain", "sub_domain", "difficulty", "source_length_category",
+        "metric", "scorer_version", "score", "delta_vs_dense",
         "exact_match", "target_accuracy", "all_target_em", "raw_substring_score",
         "normalized_substring_score", "parsed_answer",
     ]
@@ -435,6 +464,7 @@ def run(args, candidates, inputs, metadata):
     common_fields = [
         "method", "config_id", "alpha", "task", "split", "length_label",
         "total_context_budget", "prompt_budget", "actual_tokens", "sample_id", "source_id",
+        "domain", "sub_domain", "difficulty", "source_length_category",
     ]
     timing_sink = CsvSink(args.out / "timings.csv", common_fields + [
         "repeat", "prefill_ms", "prefill_tokens_s", "peak_allocated_gib",
@@ -599,6 +629,10 @@ def main():
         raise ValueError("hotpot-samples must be positive")
     if args.ruler_samples is not None and args.ruler_samples < 1:
         raise ValueError("ruler-samples must be positive")
+    if args.longbench_v2_samples is not None and args.longbench_v2_samples < 1:
+        raise ValueError("longbench-v2-samples must be positive")
+    if args.longbench_v2_min_tokens < 1:
+        raise ValueError("longbench-v2-min-tokens must be positive")
     if args.alpha < 0:
         raise ValueError("alpha must be non-negative")
     args.out.mkdir(parents=True, exist_ok=True)
