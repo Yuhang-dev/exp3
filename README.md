@@ -285,6 +285,15 @@ limitations, and output definitions are in
 The completed pilot, integrity checks, resume accounting, and interpretation
 limits are recorded in [MODERN_BENCHMARK_AUDIT.md](MODERN_BENCHMARK_AUDIT.md).
 
+The final statistical panels contain 116 native-context LongBench v2 questions
+and 100 BFCL V4 `multi_turn_base` episodes, each evaluated with Full and V1:
+
+```bash
+bash run_final_benchmarks.sh prepare
+bash run_final_benchmarks.sh longbench
+bash run_final_benchmarks.sh agent
+```
+
 The installed Transformers build requires the compatible Hub client pinned for
 this suite:
 

@@ -58,6 +58,8 @@ if [[ ! -f "$BFCL_ROOT/bfcl_eval/data/BFCL_v4_multi_turn_long_context.json" ]]; 
 fi
 
 test -f "$BFCL_ROOT/bfcl_eval/data/possible_answer/BFCL_v4_multi_turn_long_context.json"
+test -f "$BFCL_ROOT/bfcl_eval/data/BFCL_v4_multi_turn_base.json"
+test -f "$BFCL_ROOT/bfcl_eval/data/possible_answer/BFCL_v4_multi_turn_base.json"
 test -f "$BFCL_ROOT/bfcl_eval/eval_checker/multi_turn_eval/multi_turn_checker.py"
 
 echo "Prepared pinned LongBench v2 and BFCL V4 sources."

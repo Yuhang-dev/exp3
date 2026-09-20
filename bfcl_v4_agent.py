@@ -1,4 +1,4 @@
-"""Paired Full/V1 evaluation on BFCL V4 multi-turn long-context tasks."""
+"""Paired Full/V1 evaluation on pinned BFCL V4 multi-turn tasks."""
 
 import argparse
 from copy import deepcopy
@@ -28,7 +28,8 @@ from evaluate import generate, gpu_metadata, prefill
 BFCL_VERSION = "2025.12.17"
 BFCL_COMMIT = "f7cf7359b7ac615a0b294831c5ba2bc95ee4a000"
 BFCL_WHEEL_SHA256 = "8555bc9407a56682ceb7d969e87eb724f6b679deb0ef05114d9c6e786406b103"
-BFCL_CATEGORY = "multi_turn_long_context"
+BFCL_CATEGORIES = ("multi_turn_base", "multi_turn_long_context")
+DEFAULT_BFCL_CATEGORY = "multi_turn_long_context"
 ADAPTER_VERSION = "exp3-qwen25-bfcl-v2-2026-09-20"
 
 
@@ -45,6 +46,11 @@ def arguments():
         "--bfcl-wheel",
         type=Path,
         default=Path("third_party/downloads/bfcl_eval-2025.12.17-py3-none-any.whl"),
+    )
+    parser.add_argument(
+        "--category",
+        choices=BFCL_CATEGORIES,
+        default=DEFAULT_BFCL_CATEGORY,
     )
     parser.add_argument("--methods", nargs="+", choices=("dense", "fp_v1"), default=["dense", "fp_v1"])
     parser.add_argument("--samples", type=int, default=20)
@@ -175,8 +181,9 @@ def select_entries(entries, count, seed):
 def load_bfcl(args):
     package = args.bfcl_root / "bfcl_eval"
     data_root = package / "data"
-    data_path = data_root / "BFCL_v4_multi_turn_long_context.json"
-    answer_path = data_root / "possible_answer" / "BFCL_v4_multi_turn_long_context.json"
+    category = getattr(args, "category", DEFAULT_BFCL_CATEGORY)
+    data_path = data_root / f"BFCL_v4_{category}.json"
+    answer_path = data_root / "possible_answer" / f"BFCL_v4_{category}.json"
     if not data_path.is_file() or not answer_path.is_file():
         raise FileNotFoundError(
             f"BFCL V4 files are missing under {args.bfcl_root}; "
@@ -195,8 +202,8 @@ def load_bfcl(args):
         )
     verified_extracted_files = 0
     exact_members = {
-        "bfcl_eval/data/BFCL_v4_multi_turn_long_context.json",
-        "bfcl_eval/data/possible_answer/BFCL_v4_multi_turn_long_context.json",
+        f"bfcl_eval/data/BFCL_v4_{category}.json",
+        f"bfcl_eval/data/possible_answer/BFCL_v4_{category}.json",
         "bfcl_eval/constants/executable_backend_config.py",
     }
     with zipfile.ZipFile(args.bfcl_wheel) as archive:
@@ -276,6 +283,7 @@ def load_bfcl(args):
         selected_rows.append(row)
 
     sources = {
+        "category": category,
         "package_version": BFCL_VERSION,
         "leaderboard_commit": BFCL_COMMIT,
         "wheel_sha256_expected": BFCL_WHEEL_SHA256,
@@ -448,14 +456,14 @@ def run_episode(
     warmed_generation,
 ):
     model_name = f"exp3_agent_{config['config_id']}"
-    test_category = entry["id"].rsplit("_", 1)[0]
+    is_long_context = args.category == "multi_turn_long_context"
     multi_turn_utils.execute_multi_turn_func_call(
         [],
         entry["initial_config"],
         entry["involved_classes"],
         model_name,
         entry["id"],
-        long_context="long_context" in test_category,
+        long_context=is_long_context,
         is_evaL_run=False,
     )
     messages = []
@@ -562,7 +570,7 @@ def run_episode(
                 entry["involved_classes"],
                 model_name,
                 entry["id"],
-                long_context=True,
+                long_context=is_long_context,
                 is_evaL_run=False,
             )
             step_log["execution_results"] = execution_results
@@ -589,7 +597,7 @@ def run_episode(
     drop_instances(multi_turn_utils, [model_name], entry)
     return {
         "id": entry["id"],
-        "category": BFCL_CATEGORY,
+        "category": args.category,
         "method": config["method"],
         "config_id": config["config_id"],
         "alpha": config["alpha"],
@@ -633,7 +641,7 @@ def score_record(record, entry, multi_turn_utils, multi_turn_checker):
             checker_decoded_result,
             entry["ground_truth"],
             entry,
-            BFCL_CATEGORY,
+            record["category"],
             score_model_name,
         )
     drop_instances(
@@ -670,12 +678,12 @@ def median(values):
     return statistics.median(values) if values else None
 
 
-def make_report(folder, quality_rows, episode_rows, timing_rows):
+def make_report(folder, quality_rows, episode_rows, timing_rows, category):
     by_config = {}
     for row in episode_rows:
         by_config.setdefault(row["config_id"], []).append(row)
     lines = [
-        "# BFCL V4 multi-turn long-context: Full vs V1",
+        f"# BFCL V4 {category}: Full vs V1",
         "",
         "能力分数使用 BFCL V4 官方 `multi_turn_checker`：执行模型工具调用后逐轮比较后端状态与返回结果。",
         "下表中的 `dense` 即 Full attention；`fp_v1__a0p08` 即 FlashPrefill V1。",
@@ -767,7 +775,7 @@ def write_csv_rows(path, fields, rows):
     sink.close()
 
 
-def prepare_resume_prefix(folder, schedule, timing_fields, attempt_dir):
+def prepare_resume_prefix(folder, schedule, timing_fields, attempt_dir, category):
     generations_path = folder / "generations.jsonl"
     timings_path = folder / "timings.csv"
     if not generations_path.is_file() or not timings_path.is_file():
@@ -786,6 +794,10 @@ def prepare_resume_prefix(folder, schedule, timing_fields, attempt_dir):
     if actual_keys != expected_keys[:len(actual_keys)]:
         raise ValueError("saved generations are not an exact prefix of the requested schedule")
     for record, (entry, config) in zip(records, schedule):
+        if record["category"] != category:
+            raise ValueError(
+                f"category changed for {entry['id']}: {record['category']} != {category}"
+            )
         if record["source_row_sha256"] != entry["source_row_sha256"]:
             raise ValueError(f"source hash changed for {entry['id']}")
         if record["method"] != config["method"] or record["alpha"] != config["alpha"]:
@@ -827,7 +839,7 @@ def prepare_resume_prefix(folder, schedule, timing_fields, attempt_dir):
     for config_id in sorted({config["config_id"] for _, config in schedule}):
         path = folder / "official_results" / config_id / "multi_turn"
         path.mkdir(parents=True, exist_ok=True)
-        with (path / "BFCL_v4_multi_turn_long_context_result.json").open(
+        with (path / f"BFCL_v4_{category}_result.json").open(
             "w", encoding="utf-8"
         ) as output:
             for record in records:
@@ -882,6 +894,7 @@ def run(
             schedule,
             timing_fields,
             resume_attempt_dir,
+            args.category,
         )
         metadata["active_resume"] = resume_manifest
     else:
@@ -915,7 +928,7 @@ def run(
         path = args.out / "official_results" / config["config_id"] / "multi_turn"
         path.mkdir(parents=True, exist_ok=True)
         official_outputs[config["config_id"]] = (
-            path / "BFCL_v4_multi_turn_long_context_result.json"
+            path / f"BFCL_v4_{args.category}_result.json"
         ).open(output_mode, encoding="utf-8")
 
     warmed_shapes = set()
@@ -1014,7 +1027,7 @@ def run(
     timing_rows = []
     with (args.out / "timings.csv").open(encoding="utf-8") as source:
         timing_rows.extend(csv.DictReader(source))
-    make_report(args.out, quality_rows, episode_rows, timing_rows)
+    make_report(args.out, quality_rows, episode_rows, timing_rows, args.category)
     metadata["status"] = "complete"
     metadata["completed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     write_json(args.out / "metadata.json", metadata)

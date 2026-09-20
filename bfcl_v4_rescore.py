@@ -65,10 +65,22 @@ def main():
         for row in read_jsonl(predictions_path)
     } if predictions_path.is_file() else {}
     run_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    categories = {record["category"] for record in records}
+    if len(categories) != 1:
+        raise ValueError(f"saved trajectories contain mixed BFCL categories: {categories}")
+    category = categories.pop()
+    metadata_category = run_metadata["arguments"].get(
+        "category", "multi_turn_long_context"
+    )
+    if category != metadata_category:
+        raise ValueError(
+            f"trajectory category {category} differs from metadata {metadata_category}"
+        )
 
     loader_args = SimpleNamespace(
         bfcl_root=args.bfcl_root,
         bfcl_wheel=args.bfcl_wheel,
+        category=category,
         samples=200,
         seed=int(run_metadata["arguments"]["seed"]),
         selected_cases=None,
@@ -152,6 +164,7 @@ def main():
     lines = [
         "# BFCL V4 offline rescoring snapshot",
         "",
+        f"- Category: `{category}`",
         f"- Pinned checker package: `{BFCL_VERSION}`",
         f"- Raw trajectories rescored: {len(records)}",
         f"- Compared with stored checker results: {compared}",
@@ -178,6 +191,7 @@ def main():
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "run_dir": str(args.run_dir.resolve()),
         "bfcl_package_version": BFCL_VERSION,
+        "category": category,
         "generation_rerun": False,
         "raw_generation_sha256": file_hash(raw_path),
         "stored_predictions_sha256": (

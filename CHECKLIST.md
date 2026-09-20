@@ -117,6 +117,18 @@ Status legend: `[x]` complete, `[~]` in progress, `[ ]` pending, `[!]` blocked/f
 - [x] Remote: complete and audit the 20-row BFCL V4 Full/V1 pilot. Both succeed on the same 2/20 episodes; only 38/189 V1 steps have identical Full prompts and their median prefill speedup is 1.01×. Three overflows per method, one step-limit failure per method, a 512-token generation cap, and the 10% Full baseline make this a floor-effect result rather than evidence of V1 parity.
 - [x] Save immutable offline rescores (0/48 LongBench and 0/40 BFCL decisions changed), write `MODERN_BENCHMARK_AUDIT.md`, and preserve all inputs/results/resume artifacts in archive SHA256 `383d5c52db535ae53804f0213a265b9996e570bf1cd9dbd896fca2a59c3dd820`.
 
+## Phase 8 — final 100+ paired panels
+
+- [x] Do not mechanically expand the 10%-Full BFCL long-context pilot: retain it as a stress test and use BFCL V4 `multi_turn_base` for the final non-floor Agent panel.
+- [x] Count the pinned sources before freezing scale: LongBench v2 has exactly 116 complete official prompts in `[8,192, 32,640]` native tokens; BFCL V4 provides 200 official `multi_turn_base` rows.
+- [x] Prepare and hash the complete 116-row LongBench panel without truncation or duplicate sampling. Remote `inputs.pt` SHA256: `fb01a2dcf3934f1c2b05576fb8985e51bc4a636497ed148f9719b2284a54306b`.
+- [x] Generalize the BFCL runner/rescorer from a hard-coded long-context category to pinned `multi_turn_base` or `multi_turn_long_context`, including the category-specific simulator mode, source hashes, checker category, result filename, reporting, and exact-prefix resume validation.
+- [x] Add `run_final_benchmarks.sh` for fixed 116-row LongBench and 100-row BFCL base Full/V1 runs.
+- [ ] Remote: prepare and inspect the fixed 100-row BFCL V4 `multi_turn_base` manifest.
+- [ ] Remote: run and audit the 116-row LongBench v2 Full/V1 panel.
+- [ ] Remote: run and audit the 100-row BFCL V4 `multi_turn_base` Full/V1 panel, including dense success-floor check, trajectory divergence, generation-limit hits, overflow, same-prompt coverage, and paired prefill speedup.
+- [ ] Save immutable offline rescores and a combined final archive before interpreting either quality gap.
+
 ## Progress log
 
 - 2026-09-16: implementation contract read; isolated `exp3/` created; `exp2` audit started. No GPU checks or experiments run.
@@ -148,3 +160,4 @@ Status legend: `[x]` complete, `[~]` in progress, `[ ]` pending, `[!]` blocked/f
 - 2026-09-20: LongBench completed with status `complete` and all expected report artifacts. BFCL then stopped during episode 32/40 after saving 31 complete episodes. Saved metadata recovers `KeyError: 'arguments'`: a model emitted valid JSON with a tool name but no argument field, and the adapter incorrectly reinserted it as a structured call on the next official turn. The fix preserves it as raw invalid output (so the checker can penalize it), executes no tool, and resumes only the missing suffix. The original failed metadata, 31 records, 834 timing rows, and exact three-row partial episode were inspected remotely before mutation.
 - 2026-09-20: the first resume invocation passed the real 31-record prefix validation and archived its inputs, then was stopped before generation while Hugging Face Hub waited on an unnecessary online model-config HEAD request. Resume now forces Hub offline mode because the exact model/tokenizer cache already produced both pilots; the offline invocation loaded all four shards and crossed the formerly crashing episode.
 - 2026-09-20: both modern pilots and their offline scorer audits are complete. LongBench is 7/24 Full versus 9/24 V1 with 1.20× paired prefill speedup; paired outcomes show only a net two-question difference. BFCL is 2/20 for both methods with no success flips, a 1.01× same-prompt speedup, and longer/slower V1 trajectories. The BFCL result is non-discriminating because the Full baseline is at 10%, not evidence of quality parity. Complete artifacts were downloaded and hash-verified; see `MODERN_BENCHMARK_AUDIT.md`.
+- 2026-09-20: user set the final evidence target to at least 100 fixed cases per benchmark with paired Full/V1 outputs. The complete eligible LongBench v2 panel is frozen at 116 rows (8K–32K native prompts); the final Agent panel uses 100 BFCL V4 `multi_turn_base` rows so the primary comparison is not dominated by the 2/20 Full floor observed in the long-context pilot. The prior 20-row long-context result remains a separate stress test.

@@ -163,6 +163,39 @@ records hashes of the original raw trajectories, stored scores, source package,
 and metadata. It reparses saved raw model responses before invoking the state
 checker, so both parser and checker changes can be audited without GPU work.
 
+## Final 100+ paired evaluation
+
+The 24/20 runs above are diagnostic pilots. The final comparison uses two
+larger fixed panels:
+
+- all 116 LongBench v2 `Short` rows whose complete chat-templated prompt fits
+  `[8,192, 32,640]` tokens; no truncation or duplicate sampling;
+- 100 deterministic BFCL V4 `multi_turn_base` rows, selected with the same
+  involved-class-signature round-robin rule and evaluated with the official
+  simulator, ground truth, and state checker.
+
+`multi_turn_base` replaces `multi_turn_long_context` in the final Agent panel
+because the latter gave Full only 2/20 successes. Increasing that floor-effect
+pilot alone would estimate a failure-heavy regime more precisely without making
+the Full/V1 capability comparison discriminating. The 20-row long-context run
+remains a stress-test result.
+
+Prepare both fixed manifests and run the panels separately:
+
+```bash
+bash run_final_benchmarks.sh prepare
+bash run_final_benchmarks.sh longbench
+bash run_final_benchmarks.sh agent
+```
+
+The final LongBench panel keeps 128 generation tokens. The BFCL base panel uses
+1,024 tokens per step, three synchronized prefill repeats, a 20-step limit, and
+native 32K overflow accounting. Interrupted Agent suffixes resume with:
+
+```bash
+bash run_final_benchmarks.sh agent-resume
+```
+
 ## Output files
 
 LongBench uses the normal Exp3 output contract and adds `domain_summary.csv`.
