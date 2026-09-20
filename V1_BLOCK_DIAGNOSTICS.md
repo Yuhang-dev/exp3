@@ -78,6 +78,8 @@ bash run_v1_block_diagnostics.sh \
 Successful completion requires both the root and sample `metadata.json` files to
 say `"status": "complete"`; the first data check is
 `samples/synthetic-quick-4096-0-multi_key/layer_summary.csv`.
+The completed reference smoke and exact sanity values are recorded in
+[V1_BLOCK_SMOKE_AUDIT.md](V1_BLOCK_SMOKE_AUDIT.md).
 
 Use one multi-key and one multi-query sample for lossless mechanism discovery.
 Saving Q and V is recommended here because it permits later offline tests of a

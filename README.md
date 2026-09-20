@@ -255,7 +255,9 @@ bash run_v1_block_diagnostics.sh \
 The artifact definitions, storage estimates, second multi-query command, and
 multi-sample validation stage are in
 [V1_BLOCK_DIAGNOSTICS.md](V1_BLOCK_DIAGNOSTICS.md). These diagnostic runtimes
-must not enter `prefill_ms`.
+must not enter `prefill_ms`. The completed 4K/layer-0 capture gate and its
+integrity/numerical audit are recorded in
+[V1_BLOCK_SMOKE_AUDIT.md](V1_BLOCK_SMOKE_AUDIT.md).
 
 ## Output contract
 

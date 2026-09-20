@@ -43,7 +43,8 @@ BLOCK_FIELDS = (
     "causally_available_tile_heads", "selected_tile_heads", "routed_tile_heads",
     "selected_rate", "exact_attention_mass_sum", "missed_attention_mass_sum",
     "v1_proxy_score_sum",
-    "mean_pool_jensen_gap_mean", "mean_pool_jensen_gap_exact_mass_weighted",
+    "mean_pool_jensen_gap_mean", "mean_pool_jensen_gap_row_max",
+    "mean_pool_jensen_gap_exact_mass_weighted",
 )
 
 TILE_FIELDS = (
@@ -57,7 +58,8 @@ TILE_FIELDS = (
     "exact_top_block", "proxy_exact_remote_cosine", "proxy_exact_remote_l1",
     "proxy_remote_top_block", "exact_remote_top_block",
     "mean_pool_jensen_gap_exact_mass_weighted",
-    "mean_pool_jensen_gap_missed_mass_weighted", "mean_pool_jensen_gap_max",
+    "mean_pool_jensen_gap_missed_mass_weighted",
+    "mean_pool_jensen_gap_tile_mean_max", "mean_pool_jensen_gap_row_max",
     "output_abs_l2_mean", "output_abs_l2_max",
     "output_relative_l2_mean", "output_relative_l2_max",
     "output_cosine_mean", "output_cosine_min",
@@ -70,7 +72,8 @@ LAYER_FIELDS = (
     "oracle_same_budget_retained_mass_mean", "output_relative_l2_mean",
     "output_relative_l2_p95", "output_relative_l2_max", "output_cosine_mean",
     "proxy_exact_cosine_mean", "proxy_exact_remote_cosine_mean",
-    "mean_pool_jensen_gap_exact_mass_weighted", "mean_pool_jensen_gap_max",
+    "mean_pool_jensen_gap_exact_mass_weighted",
+    "mean_pool_jensen_gap_tile_mean_max", "mean_pool_jensen_gap_row_max",
     "mean_pool_relative_l2_error_max",
 )
 
@@ -970,6 +973,7 @@ class SampleCapture:
         group = query_heads // kv_heads
         exact = oracle["exact_block_probability_mean"]
         jensen_gap = oracle["full_block_jensen_gap_mean"]
+        jensen_gap_row_max = oracle["full_block_jensen_gap_max"]
         query_counts = oracle["query_token_counts"].float()
         row_retained = oracle["row_retained_mass"]
         row_abs = oracle["row_output_abs_l2"]
@@ -987,6 +991,9 @@ class SampleCapture:
                 routed_here = routed[:, block, head_start:head_end]
                 exact_here = exact[:, block, head_start:head_end]
                 gap_here = jensen_gap[:, block, head_start:head_end]
+                gap_row_max_here = jensen_gap_row_max[
+                    :, block, head_start:head_end
+                ]
                 proxy_here = score[:, block, head_start:head_end]
                 fully_visible = (
                     torch.arange(blocks) > block
@@ -1023,6 +1030,9 @@ class SampleCapture:
                         (gap_here * gap_observation_weights).sum().item()
                         / max(1, gap_observation_weights.sum().item())
                     ),
+                    "mean_pool_jensen_gap_row_max": (
+                        gap_row_max_here * fully_visible
+                    ).max().item(),
                     "mean_pool_jensen_gap_exact_mass_weighted": (
                         (gap_here * exact_gap_weights).sum().item()
                         / max(1e-20, exact_gap_weights.sum().item())
@@ -1051,6 +1061,9 @@ class SampleCapture:
                 oracle_chosen = oracle_mask[query_block, :, head]
                 exact_distribution = exact[query_block, :, head]
                 gap_distribution = jensen_gap[query_block, :, head]
+                gap_row_max_distribution = jensen_gap_row_max[
+                    query_block, :, head
+                ]
                 exact_retained = (exact_distribution * chosen).sum().item()
                 oracle_retained = (exact_distribution * oracle_chosen).sum().item()
                 row_slice = slice(start, end)
@@ -1096,8 +1109,12 @@ class SampleCapture:
                     (gap_distribution * missed_exact_weight).sum().item()
                     / max(1e-20, missed_exact_weight.sum().item())
                 )
-                gap_max = (
+                gap_tile_mean_max = (
                     gap_distribution[remote].max().item() if remote.any() else 0.0
+                )
+                gap_row_max = (
+                    gap_row_max_distribution[remote].max().item()
+                    if remote.any() else 0.0
                 )
                 union = route | (oracle_chosen & ~fixed)
                 intersection = route & oracle_chosen
@@ -1131,7 +1148,8 @@ class SampleCapture:
                     "exact_remote_top_block": exact_remote_top,
                     "mean_pool_jensen_gap_exact_mass_weighted": gap_exact_weighted,
                     "mean_pool_jensen_gap_missed_mass_weighted": gap_missed_weighted,
-                    "mean_pool_jensen_gap_max": gap_max,
+                    "mean_pool_jensen_gap_tile_mean_max": gap_tile_mean_max,
+                    "mean_pool_jensen_gap_row_max": gap_row_max,
                     "output_abs_l2_mean": row_abs[row_slice, head].mean().item(),
                     "output_abs_l2_max": row_abs[row_slice, head].max().item(),
                     "output_relative_l2_mean": row_relative[row_slice, head].mean().item(),
@@ -1178,7 +1196,8 @@ class SampleCapture:
                 if remote_proxy_cosines else float("nan")
             ),
             "mean_pool_jensen_gap_exact_mass_weighted": gap_weighted_mean,
-            "mean_pool_jensen_gap_max": jensen_gap.max().item(),
+            "mean_pool_jensen_gap_tile_mean_max": jensen_gap.max().item(),
+            "mean_pool_jensen_gap_row_max": jensen_gap_row_max.max().item(),
             "mean_pool_relative_l2_error_max": structure[
                 "v1_mean_relative_l2_error"
             ].max().item(),
