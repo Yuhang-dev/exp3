@@ -274,7 +274,7 @@ An interrupted Agent suffix can be continued without regenerating completed
 episodes via `bash run_modern_benchmarks.sh agent-resume`; the runner validates
 the exact saved prefix and archives the failed attempt before continuing.
 
-LongBench v2 uses a deterministic, six-domain-balanced 24-row subset whose
+LongBench v2 uses a deterministic, six-domain round-robin 24-row subset whose
 complete official zero-shot prompts fit Qwen's native 32K context without
 truncation. BFCL V4 uses the official `multi_turn_long_context` data, simulated
 tool backends, and state checker through a documented Qwen2.5 adapter. BFCL
@@ -282,6 +282,8 @@ reports pure prefill speedup only for dynamic steps whose prompt hashes still
 match after the two methods' trajectories evolve. Pins, exact commands,
 limitations, and output definitions are in
 [MODERN_BENCHMARKS.md](MODERN_BENCHMARKS.md).
+The completed pilot, integrity checks, resume accounting, and interpretation
+limits are recorded in [MODERN_BENCHMARK_AUDIT.md](MODERN_BENCHMARK_AUDIT.md).
 
 The installed Transformers build requires the compatible Hub client pinned for
 this suite:

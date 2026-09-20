@@ -181,4 +181,5 @@ BFCL writes:
 | `resume_attempts/<n>/` | immutable failed-attempt metadata/timing snapshot and resume manifest |
 
 Implementation checks are local and GPU measurements are run only on the remote
-RTX 4090. Current execution status is recorded in `CHECKLIST.md`.
+RTX 4090. Current execution status is recorded in `CHECKLIST.md`; the completed
+pilot audit is in `MODERN_BENCHMARK_AUDIT.md`.
