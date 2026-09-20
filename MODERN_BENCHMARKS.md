@@ -24,6 +24,18 @@ can change backend state, tool output, and every later prompt.
 The preparation script downloads but does not install BFCL into the Torch
 environment. It verifies the LongBench data file and BFCL wheel SHA256 before
 extracting the wheel.
+The installed Transformers build requires Hugging Face Hub below 1.0. Keep the
+experiment environment on the pinned compatible client:
+
+```bash
+python -m pip install --no-deps --force-reinstall \
+  --index-url https://pypi.org/simple \
+  -r requirements-modern.txt
+```
+
+The explicit index is intentional: the AutoDL Aliyun mirror did not expose
+the pinned wheel when this suite was first run.
+
 For the AutoDL host it defaults only the Hugging Face transport endpoint to
 `https://hf-mirror.com`; an explicit `HF_ENDPOINT` overrides this, and the
 repository revision plus SHA256 remain unchanged.

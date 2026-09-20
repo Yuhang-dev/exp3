@@ -279,6 +279,15 @@ match after the two methods' trajectories evolve. Pins, exact commands,
 limitations, and output definitions are in
 [MODERN_BENCHMARKS.md](MODERN_BENCHMARKS.md).
 
+The installed Transformers build requires the compatible Hub client pinned for
+this suite:
+
+```bash
+python -m pip install --no-deps --force-reinstall \
+  --index-url https://pypi.org/simple \
+  -r requirements-modern.txt
+```
+
 ## Output contract
 
 | File | Contents |
