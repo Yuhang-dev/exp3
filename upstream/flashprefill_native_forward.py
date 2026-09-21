@@ -176,7 +176,15 @@ def compute_block_score(
 
 
 def get_attention_configs():
-    configs = []
+    # The d=256 path needs smaller compute tiles on the RTX 4090 (99 KiB/CTA).
+    # Logical routing blocks stay at 128 tokens.
+    configs = [
+        triton.Config(
+            {"Q_TILE_SIZE": 32, "K_TILE_SIZE": 32},
+            num_warps=4,
+            num_stages=1,
+        )
+    ]
     for q_tile, k_tile in ((64, 64), (128, 64), (64, 128)):
         for warps in (4, 8):
             for stages in (2, 3, 4, 5):
@@ -192,17 +200,22 @@ def get_attention_configs():
     return configs
 
 
+def prune_attention_configs(configs, named_args, **kwargs):
+    wide_head = kwargs["D_HEAD"] == 256
+    block_size = kwargs["BLOCK_SIZE"]
+    return [
+        config
+        for config in configs
+        if (config.kwargs["Q_TILE_SIZE"] == 32) == wide_head
+        and config.kwargs["Q_TILE_SIZE"] <= block_size
+        and config.kwargs["K_TILE_SIZE"] <= block_size
+    ]
+
+
 @triton.autotune(
     configs=get_attention_configs(),
-    key=["query_len", "key_len", "num_q_heads", "num_k_heads", "BLOCK_SIZE"],
-    prune_configs_by={
-        "early_config_prune": lambda configs, named_args, **kwargs: [
-            config
-            for config in configs
-            if config.kwargs["Q_TILE_SIZE"] <= kwargs["BLOCK_SIZE"]
-            and config.kwargs["K_TILE_SIZE"] <= kwargs["BLOCK_SIZE"]
-        ]
-    },
+    key=["query_len", "key_len", "num_q_heads", "num_k_heads", "BLOCK_SIZE", "D_HEAD"],
+    prune_configs_by={"early_config_prune": prune_attention_configs},
 )
 @triton.jit
 def _flash_forward(

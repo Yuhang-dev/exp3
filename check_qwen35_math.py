@@ -131,6 +131,13 @@ def main():
     exact_output, exact_lse = upstream.exact_attention(
         q, k, v, all_indices, all_counts, scale
     )
+    exact_config = upstream._flash_forward.best_config
+    exact_launch = {
+        **exact_config.kwargs,
+        "num_warps": exact_config.num_warps,
+        "num_stages": exact_config.num_stages,
+    }
+    print(f"Exact attention launch: {exact_launch}", flush=True)
     dense_output, dense_lse = dense_reference(q, k, v, scale)
     compare("qwen35_all_exact_output_vs_dense", exact_output, dense_output, records)
     compare(
@@ -168,6 +175,7 @@ def main():
                 "gpu": torch.cuda.get_device_name(),
                 "torch": torch.__version__,
                 "triton": triton.__version__,
+                "exact_attention_launch": exact_launch,
                 "checks": records,
             },
             indent=2,

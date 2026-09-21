@@ -22,7 +22,8 @@ Exp3 keeps that V1 score, routing rule, protected regions, sorted-index conventi
 2. thin Python entry points expose V1 mean/scoring, selection, and exact attention separately;
 3. the diagonal-block causal test is expressed as an equivalent predicated mask rather than a runtime Triton `if`, avoiding a scheduler diagnostic in the pinned remote environment;
 4. compiled routing outputs are cloned in the uncompiled public wrapper so CUDA Graph buffer reuse cannot invalidate masks retained across calls;
-5. the old monolithic `FlashPrefill.autograd.Function` wrapper is omitted because exp3 profiles and combines the stages explicitly.
+5. the old monolithic `FlashPrefill.autograd.Function` wrapper is omitted because exp3 profiles and combines the stages explicitly;
+6. Qwen3.5's head dimension 256 uses 32-by-32 compute tiles with four warps and one pipeline stage after the original launch exceeded the RTX 4090's 101376-byte shared-memory limit. Logical routing blocks remain 128 tokens, and each selected block is traversed in four K micro-tiles. Head dimension is included in the exact-path autotune key; the head-dimension-128 candidate set is unchanged. The remote math gate records the selected launch configuration.
 
 The new block variance, Value dispersion, balanced/CGF/dispersion selectors, unselected-mean path, and log-domain merge live in `exp3/kernels.py`; they are project code and are not labeled as an official FlashPrefill V2 kernel.
 
