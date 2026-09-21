@@ -535,7 +535,7 @@ def split_qwen_response(raw_text, thinking):
 
 
 @torch.inference_mode()
-def generate(model, tokenizer, input_ids, max_new_tokens, thinking):
+def generate(model, tokenizer, input_ids, max_new_tokens, thinking, progress_every=0):
     torch.compiler.cudagraph_mark_step_begin()
     output = model(input_ids=input_ids, use_cache=True, logits_to_keep=1)
     token = output.logits[:, -1].argmax(dim=-1, keepdim=True)
@@ -560,6 +560,8 @@ def generate(model, tokenizer, input_ids, max_new_tokens, thinking):
         cache = output.past_key_values
         generated.append(token.item())
         del output
+        if progress_every and len(generated) % progress_every == 0:
+            print(f"Decode progress: {len(generated)}/{max_new_tokens} tokens", flush=True)
     end_reason = "eos" if generated[-1] in terminal_ids else "max_new_tokens"
     decoded_ids = list(generated)
     while decoded_ids and decoded_ids[-1] in terminal_ids:
