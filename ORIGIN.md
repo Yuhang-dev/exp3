@@ -81,3 +81,29 @@ a built-in handler. `bfcl_v4_agent.py` therefore provides a project adapter that
 mirrors the package's Qwen `<tool_call>` protocol. The raw data, backend, and
 checker remain official and pinned; the resulting comparison is not labeled an
 official BFCL leaderboard submission.
+
+## Qwen3.5 CL-bench paired subset
+
+- Model: `Qwen/Qwen3.5-4B`, revision
+  `851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a`.
+- Dataset: `tencent/CL-bench`, revision
+  `b28a5832a09b0d96c0cf4c22e90d7c60ede25b80`, `CL-bench.jsonl` SHA256
+  `d5fc88d4b2eea75c61dd40862021b6ae2fba26bd21b58e8c5e18377a763943be`.
+- Official inference/evaluation repository: `Tencent-Hunyuan/CL-bench`, commit
+  `16bffd1cfa05927e72ec75c835177d6e23e82172`.
+- Official quality judge: `gpt-5.1`, low reasoning effort, strict all-rubrics
+  binary task success.
+
+Exp3 uses the model's own thinking-enabled chat template, greedy local decoding,
+and the unchanged official messages and rubrics. Only text after `</think>` is
+exported to the official judge; raw generated IDs and reasoning remain in the
+scorer-independent artifact. The experiment is a deterministic category-balanced
+100-task panel under a 65,536-token prompt-plus-generation bound with no truncation,
+not a claim of the official 1,899-task leaderboard score.
+
+The model has 24 Gated Delta layers and eight full-attention layers. Exp3 registers
+the existing V1 backend only at the standard full-attention interface; the linear
+layers keep the Transformers/Hugging Face kernel path. Running the new entrypoints
+as `python -m exp3...` is intentional: it lets project code import `exp3.kernels`
+without shadowing the separate top-level `kernels` distribution required by
+Qwen3.5's FLA and causal-convolution implementations.

@@ -1,11 +1,15 @@
-"""Transformers 4.51 attention backend for dense, V1, and mean-corrected prefill."""
+"""Transformers attention backend for dense, V1, and mean-corrected prefill."""
 
 import torch
 import torch.nn.functional as F
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
-import kernels
-from upstream import flashprefill_native_forward as upstream
+try:
+    from . import kernels
+    from .upstream import flashprefill_native_forward as upstream
+except ImportError:
+    import kernels
+    from upstream import flashprefill_native_forward as upstream
 
 
 METHODS = (

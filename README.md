@@ -1,6 +1,6 @@
 # exp3: task-quality-first sparse prefill
 
-This directory implements the P0/P1 loop from `research/refinement-prefill-2026-09-16/IMPLEMENTATION_BRIEF.md` for frozen `Qwen/Qwen2.5-7B-Instruct`, BF16, batch 1, and one RTX 4090.
+This directory implements the P0/P1 loop from `research/refinement-prefill-2026-09-16/IMPLEMENTATION_BRIEF.md` for frozen `Qwen/Qwen2.5-7B-Instruct`, BF16, batch 1, and one RTX 4090. It also contains an isolated Qwen3.5-4B Full/V1 continuation for CL-bench; that path uses a separate environment and result namespace.
 
 The primary outputs are paired final-answer quality and full-model prefill latency. Internal attention agreement is used only by the focused implementation checks.
 
@@ -308,6 +308,81 @@ offline rescoring, paired uncertainty, sub-evaluations, interrupted-run
 accounting, and archive hash are recorded in
 [FINAL_100PLUS_AUDIT.md](FINAL_100PLUS_AUDIT.md). The derived tables can be
 regenerated from the preserved archive with `analyze_final_benchmarks.py`.
+
+## 11. Qwen3.5-4B Full vs V1 on CL-bench
+
+This experiment uses Tencent-Hunyuan CL-bench, not the unrelated continual-learning
+benchmark with the same abbreviation. Sources are pinned before preparation:
+
+```bash
+cd /root/autodl-tmp/exp3
+export HF_ENDPOINT=https://hf-mirror.com
+
+hf download Qwen/Qwen3.5-4B \
+  --revision 851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a \
+  --local-dir models/Qwen3.5-4B
+
+hf download tencent/CL-bench \
+  --repo-type dataset \
+  --revision b28a5832a09b0d96c0cf4c22e90d7c60ede25b80 \
+  --local-dir datasets/cl_bench
+
+git clone https://github.com/Tencent-Hunyuan/CL-bench.git third_party/CL-bench
+git -C third_party/CL-bench checkout 16bffd1cfa05927e72ec75c835177d6e23e82172
+sha256sum datasets/cl_bench/CL-bench.jsonl
+```
+
+The expected dataset hash is
+`d5fc88d4b2eea75c61dd40862021b6ae2fba26bd21b58e8c5e18377a763943be`.
+Create the isolated environment and execute the gates in order:
+
+```bash
+bash run_clbench_qwen35.sh setup
+bash run_clbench_qwen35.sh prepare
+bash run_clbench_qwen35.sh check
+bash run_clbench_qwen35.sh smoke
+bash run_clbench_qwen35.sh run
+```
+
+`setup` clones the existing CUDA/Torch environment to `exp35` and upgrades only
+that clone to Transformers 5.17.0. The old Qwen2.5 environment is untouched.
+The smoke stage stays online once so the official Hugging Face FLA and causal-conv
+kernels used by Qwen3.5's linear layers can be cached; the 100-task run is then
+offline and reproducible. If the terminal job is interrupted, continue its exact
+saved prefix with:
+
+```bash
+bash run_clbench_qwen35.sh resume
+```
+
+Qwen3.5-4B has 24 Gated Delta layers and eight full-attention layers. Full and V1
+use identical 24 linear layers; V1 replaces prefill only in full-attention layers
+3, 7, 11, 15, 19, 23, 27, and 31. The head-dimension-256 Triton path must pass
+`check_qwen35_math.py` before model inference. Reported prefill latency still covers
+the complete 32-layer forward, LM head, and first-token argmax, while profile density
+refers only to the eight full-attention layers.
+
+The fixed panel contains 100 unique tasks selected by deterministic round-robin over
+the four categories and their sub-categories after applying the native context bound.
+No prompt is truncated. `inputs.pt` retains exact token IDs; every generation saves
+raw token IDs, reasoning text, final text, and termination status before scoring.
+This is a paired diagnostic subset, not an official full-1,899-task leaderboard score.
+
+Official quality grading is a separate paid/API stage (200 judge calls total):
+
+```bash
+export OPENAI_API_KEY=...
+export CLBENCH_JUDGE_WORKERS=4
+bash run_clbench_qwen35.sh judge
+```
+
+The pinned official evaluator uses `gpt-5.1` with low reasoning effort and receives
+only the final answer, as required for reasoning models. It can resume partial judge
+files without rerunning Qwen. After both files are complete, `clbench_report.py`
+validates their exact messages, rubrics, task IDs, and saved final text, then writes
+`quality.csv`, `summary.csv`, `subgroups.csv`, `paired_outcomes.csv`, `judge_audit.json`,
+and `REPORT.md`. The report separates all categories, sub-categories, and prompt-length
+buckets and includes paired Full-only/V1-only outcomes.
 
 ## Output contract
 
