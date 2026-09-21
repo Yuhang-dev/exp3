@@ -351,6 +351,12 @@ Linear layers use installed `fla-core==0.3.2` and the official
 Setup uses the Aliyun PyPI mirror and downloads the convolution wheel from the
 author's GitHub release. `kernels` alone does not enable Hub kernels; this runner
 explicitly uses the native packages and records their versions in metadata.
+If the mirror does not list `fla-core`, select official PyPI explicitly:
+
+```bash
+QWEN35_PIP_INDEX_URL=https://pypi.org/simple bash run_clbench_qwen35.sh setup
+```
+
 The 100-task run is offline. After changing linear-kernel packages, start a fresh
 smoke/panel output rather than resuming reference-PyTorch timings.
 If the terminal job is interrupted with the same packages, continue its exact

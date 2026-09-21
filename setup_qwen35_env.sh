@@ -12,7 +12,7 @@ fi
 
 conda activate "$TARGET_ENV"
 python -m pip install \
-  --index-url https://mirrors.aliyun.com/pypi/simple/ \
+  --index-url "${QWEN35_PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}" \
   --upgrade \
   --requirement "$ROOT/requirements-qwen35.txt"
 
