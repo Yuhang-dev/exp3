@@ -1,6 +1,6 @@
 # exp3 implementation checklist
 
-Last updated: 2026-09-20
+Last updated: 2026-09-21
 
 Status legend: `[x]` complete, `[~]` in progress, `[ ]` pending, `[!]` blocked/failed.
 
@@ -124,10 +124,10 @@ Status legend: `[x]` complete, `[~]` in progress, `[ ]` pending, `[!]` blocked/f
 - [x] Prepare and hash the complete 116-row LongBench panel without truncation or duplicate sampling. Remote `inputs.pt` SHA256: `fb01a2dcf3934f1c2b05576fb8985e51bc4a636497ed148f9719b2284a54306b`.
 - [x] Generalize the BFCL runner/rescorer from a hard-coded long-context category to pinned `multi_turn_base` or `multi_turn_long_context`, including the category-specific simulator mode, source hashes, checker category, result filename, reporting, and exact-prefix resume validation.
 - [x] Add `run_final_benchmarks.sh` for fixed 116-row LongBench and 100-row BFCL base Full/V1 runs.
-- [x] Remote: prepare and inspect the fixed 100-row BFCL V4 `multi_turn_base` manifest. It contains 100 unique base IDs, covers all 20 involved-class signatures, verifies 33 pinned wheel members, and passes an official-checker ground-truth self-test. Manifest SHA256: `6b17c4ecd6e515ff71394e0c0a78d9ef4cb5d5d394711cb22fa1ca8b955fe4fba`.
-- [~] Remote: run and audit the 116-row LongBench v2 Full/V1 panel. Generation is complete with 232/232 outputs, 696/696 timing rows, and 232/232 stored scores after exact-prefix recovery; offline rescore and audit remain pending.
-- [~] Remote: run and audit the 100-row BFCL V4 `multi_turn_base` Full/V1 panel, including dense success-floor check, trajectory divergence, generation-limit hits, overflow, same-prompt coverage, and paired prefill speedup. The detached `screen` chain entered BFCL automatically after LongBench completion.
-- [ ] Save immutable offline rescores and a combined final archive before interpreting either quality gap.
+- [x] Remote: prepare and inspect the fixed 100-row BFCL V4 `multi_turn_base` manifest. It contains 100 unique base IDs, covers all 20 involved-class signatures, verifies 33 pinned wheel members, and passes an official-checker ground-truth self-test. Manifest SHA256: `6b17c4ecd6e515ff71394e0c0a78d9ef4cb5d5d394711cb22fa1ca8b95fe4fba`.
+- [x] Remote: run and audit the 116-row LongBench v2 Full/V1 panel. The complete result has 232/232 outputs, 696/696 timing rows, and 232/232 stored scores after exact-prefix recovery; independent raw-text rescoring changes 0 decisions.
+- [x] Remote: run and audit the 100-row BFCL V4 `multi_turn_base` Full/V1 panel, including dense success-floor check, trajectory divergence, generation-limit hits, overflow, same-prompt coverage, and paired prefill speedup. The pinned official checker replay changes 0/200 decisions and 0/200 error types.
+- [x] Save immutable offline rescores and a combined final archive before interpreting either quality gap. Preserve paired outcomes, subgroup/length tables, integrity hashes, and descriptive bootstrap intervals under the extracted audit directory.
 
 ## Progress log
 
@@ -165,3 +165,4 @@ Status legend: `[x]` complete, `[~]` in progress, `[ ]` pending, `[!]` blocked/f
 - 2026-09-20: launched one sequential remote GPU job: LongBench 116×(Full,V1) first, then BFCL base 100×(Full,V1) only if LongBench completes. Console output is retained in `results/final_100plus_console.log`; early first-sample timing is treated only as a startup check, not a result.
 - 2026-09-20: the original SSH-backed job was terminated when its terminal closed, but all 103 complete LongBench pairs remained intact. Added and dry-ran exact-prefix resume: schedule IDs/configs/input hashes and repeat order match; 618 timing rows are retained and four partial rows are archived. Recovery now runs inside detached `screen` session `exp3_final`, followed automatically by BFCL if LongBench completes.
 - 2026-09-20: recovered LongBench completed all 116 sample pairs (232 generations, 696 timing rows, 232 stored scores) without rerunning the retained 103-pair prefix. The same detached chain then started BFCL base; final interpretation remains deferred until BFCL completion and both offline rescoring audits.
+- 2026-09-21: preserved and audited `final_100plus_20260921.tar.gz` (SHA256 `E8CE375F1B43DC5F6F7BDA753C411A75A3AA5B900EA16F92519AE3E710F25718`). LongBench is 42/116 Full versus 45/116 V1 (+2.59 pp; 4 Full-only and 7 V1-only), with 1.153× paired prefill speedup and 0/232 independent rescore changes. BFCL base is 22/100 Full versus 21/100 V1 (-1 pp; 2 Full-only and 1 V1-only); 266/933 V1 steps retain identical prompts and show 1.011× paired prefill speedup, with 0/200 official-checker decision or error-type changes. Descriptive paired intervals include zero for both quality gaps. Full integrity, recovery, subgroup, and interpretation details are in `FINAL_100PLUS_AUDIT.md`.

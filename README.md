@@ -303,6 +303,12 @@ python -m pip install --no-deps --force-reinstall \
   -r requirements-modern.txt
 ```
 
+The completed 116-question LongBench and 100-episode BFCL runs, independent
+offline rescoring, paired uncertainty, sub-evaluations, interrupted-run
+accounting, and archive hash are recorded in
+[FINAL_100PLUS_AUDIT.md](FINAL_100PLUS_AUDIT.md). The derived tables can be
+regenerated from the preserved archive with `analyze_final_benchmarks.py`.
+
 ## Output contract
 
 | File | Contents |
