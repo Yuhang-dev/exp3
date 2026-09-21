@@ -67,6 +67,7 @@ def arguments():
     )
     parser.add_argument("--min-prompt-tokens", type=int, default=0)
     parser.add_argument("--max-new-tokens", type=int, default=2048)
+    parser.add_argument("--decoding", choices=["greedy", "qwen35"], default="greedy")
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--alpha", type=float, default=0.08)
     parser.add_argument("--inputs", type=Path, help="Reuse an exact inputs.pt snapshot.")
@@ -416,7 +417,12 @@ def make_metadata(args, configs, inputs, selection):
             "primary_metric": "strict binary task success: every rubric must pass",
         },
         "generation": {
-            "decoding": "greedy",
+            "decoding": args.decoding,
+            "sampling": {
+                "temperature": 1.0, "top_p": 0.95, "top_k": 20,
+                "presence_penalty": 1.5, "repetition_penalty": 1.0,
+                "seed_policy": "seed + sample_index; reset for each method",
+            } if args.decoding == "qwen35" else None,
             "thinking": args.thinking,
             "judge_text": "final answer only; raw reasoning and token IDs remain in generations.jsonl",
             "max_new_tokens": args.max_new_tokens,
@@ -535,10 +541,33 @@ def split_qwen_response(raw_text, thinking):
 
 
 @torch.inference_mode()
-def generate(model, tokenizer, input_ids, max_new_tokens, thinking, progress_every=0):
+def generate(model, tokenizer, input_ids, max_new_tokens, thinking, progress_every=0,
+             decoding="greedy", seed=42):
+    rng = torch.Generator(device=input_ids.device).manual_seed(seed)
+    seen = None
+
+    def next_token(logits):
+        nonlocal seen
+        if decoding == "greedy":
+            return logits.argmax(dim=-1, keepdim=True)
+        if seen is None:
+            seen = torch.zeros_like(logits, dtype=torch.bool)
+        # Qwen3.5 model-card general thinking settings; penalize generated tokens only.
+        scores = logits.float() - 1.5 * seen
+        values, indices = scores.topk(20, dim=-1)
+        probabilities = values.softmax(dim=-1)
+        remove = probabilities.cumsum(dim=-1) > 0.95
+        remove[:, 1:] = remove[:, :-1].clone()
+        remove[:, 0] = False
+        probabilities.masked_fill_(remove, 0)
+        choice = torch.multinomial(probabilities, 1, generator=rng)
+        selected = indices.gather(-1, choice)
+        seen.scatter_(-1, selected, True)
+        return selected
+
     torch.compiler.cudagraph_mark_step_begin()
     output = model(input_ids=input_ids, use_cache=True, logits_to_keep=1)
-    token = output.logits[:, -1].argmax(dim=-1, keepdim=True)
+    token = next_token(output.logits[:, -1])
     cache = output.past_key_values
     del output
     generated = [token.item()]
@@ -556,7 +585,7 @@ def generate(model, tokenizer, input_ids, max_new_tokens, thinking, progress_eve
             cache_position=cache_position,
             logits_to_keep=1,
         )
-        token = output.logits[:, -1].argmax(dim=-1, keepdim=True)
+        token = next_token(output.logits[:, -1])
         cache = output.past_key_values
         generated.append(token.item())
         del output
@@ -862,13 +891,20 @@ def run(args, configs, inputs, metadata, attempt_dir=None):
                     expected_generations[generation_position] == schedule_key
                 ):
                     backend.configure(config.method, config.alpha)
+                    torch.cuda.synchronize()
+                    torch.cuda.reset_peak_memory_stats()
+                    generation_started = time.perf_counter()
                     generated = generate(
                         model,
                         tokenizer,
                         input_ids,
                         sample["max_new_tokens"],
                         args.thinking,
+                        progress_every=2048,
+                        decoding=args.decoding,
+                        seed=args.seed + sample["sample_index"],
                     )
+                    torch.cuda.synchronize()
                     record = {
                         "method": config.method,
                         "config_id": config.config_id,
@@ -877,6 +913,9 @@ def run(args, configs, inputs, metadata, attempt_dir=None):
                         "source_row_sha256": sample["source_row_sha256"],
                         "messages_sha256": sample["messages_sha256"],
                         "rubrics_sha256": sample["rubrics_sha256"],
+                        "generation_seconds": time.perf_counter() - generation_started,
+                        "generation_peak_allocated_gib": torch.cuda.max_memory_allocated() / 2**30,
+                        "generation_peak_reserved_gib": torch.cuda.max_memory_reserved() / 2**30,
                         **generated,
                     }
                     generations.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -950,7 +989,7 @@ def validate_resume_arguments(previous, current):
     for key in (
         "model", "samples", "seed", "context_limit", "min_prompt_tokens",
         "max_new_tokens", "repeats", "alpha", "thinking", "profile",
-        "selector_chunk_tiles",
+        "selector_chunk_tiles", "decoding",
     ):
         if previous["arguments"].get(key) != current["arguments"].get(key):
             raise ValueError(f"resume argument changed: {key}")

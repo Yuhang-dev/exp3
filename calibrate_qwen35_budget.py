@@ -22,6 +22,7 @@ def main():
     parser.add_argument("--inputs", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--max-new-tokens", type=int, default=32768)
+    parser.add_argument("--decoding", choices=["greedy", "qwen35"], default="greedy")
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=False)
     torch.manual_seed(42)
@@ -35,6 +36,7 @@ def main():
         "selection": "longest prompt, first finance task, first game-mechanics task",
         "sample_indices": indices,
         "max_new_tokens": args.max_new_tokens,
+        "decoding": args.decoding,
         "torch": torch.__version__,
         "linear_kernels": {p: importlib.metadata.version(p) for p in ["fla-core", "causal-conv1d"]},
     }
@@ -63,6 +65,7 @@ def main():
                     generated = generate(
                         model, tokenizer, input_ids, args.max_new_tokens,
                         thinking=True, progress_every=2048,
+                        decoding=args.decoding, seed=42 + index,
                     )
                     torch.cuda.synchronize()
                     metrics = {
