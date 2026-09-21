@@ -1,4 +1,4 @@
 transformers==5.17.0
 kernels==0.16.0
+fla-core==0.3.2
 openai==3.16.2
-

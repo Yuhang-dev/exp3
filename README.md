@@ -346,9 +346,14 @@ bash run_clbench_qwen35.sh run
 
 `setup` clones the existing CUDA/Torch environment to `exp35` and upgrades only
 that clone to Transformers 5.17.0. The old Qwen2.5 environment is untouched.
-The smoke stage stays online once so the official Hugging Face FLA and causal-conv
-kernels used by Qwen3.5's linear layers can be cached; the 100-task run is then
-offline and reproducible. If the terminal job is interrupted, continue its exact
+Linear layers use installed `fla-core==0.3.2` and the official
+`causal-conv1d==1.5.0.post8` binary for Torch 2.6 / CUDA 12 / Python 3.11.
+Setup uses the Aliyun PyPI mirror and downloads the convolution wheel from the
+author's GitHub release. `kernels` alone does not enable Hub kernels; this runner
+explicitly uses the native packages and records their versions in metadata.
+The 100-task run is offline. After changing linear-kernel packages, start a fresh
+smoke/panel output rather than resuming reference-PyTorch timings.
+If the terminal job is interrupted with the same packages, continue its exact
 saved prefix with:
 
 ```bash

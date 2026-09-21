@@ -98,7 +98,7 @@ run_smoke() {
     echo "Refusing to overwrite $SMOKE_OUT" >&2
     exit 1
   fi
-  # Keep the Hub online here so the official FLA/causal-conv kernels are cached.
+  # Linear-layer kernels are installed by setup; all model inputs are local.
   run_module exp3.clbench_qwen35 \
     --model "$MODEL" \
     --data "$DATA" \

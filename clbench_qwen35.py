@@ -5,6 +5,7 @@ from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 import csv
 import hashlib
+import importlib.metadata
 import json
 from pathlib import Path
 import platform
@@ -377,6 +378,16 @@ def source_hashes():
 
 
 def make_metadata(args, configs, inputs, selection):
+    linear_kernels = None
+    if not args.prepare_only:
+        from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
+        from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
+
+        linear_kernels = {
+            "backend": "native_packages",
+            "fla-core": importlib.metadata.version("fla-core"),
+            "causal-conv1d": importlib.metadata.version("causal-conv1d"),
+        }
     return {
         "status": "prepared" if args.prepare_only else "running",
         "quality_status": "pending_official_judge",
@@ -425,6 +436,7 @@ def make_metadata(args, configs, inputs, selection):
             "torch": torch.__version__,
             "transformers": transformers.__version__,
             "triton": triton.__version__,
+            "linear_kernels": linear_kernels,
             "package_entrypoint": "python -m exp3.clbench_qwen35",
         },
         "source_sha256": source_hashes(),
@@ -790,9 +802,11 @@ def run(args, configs, inputs, metadata, attempt_dir=None):
         args.model,
         dtype=torch.bfloat16,
         attn_implementation="sdpa",
+        use_kernels=False,
         device_map="cuda",
     ).eval()
     model.requires_grad_(False)
+    print(f"Linear attention kernels: {metadata['environment']['linear_kernels']}", flush=True)
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     metadata["architecture"] = validate_architecture(model)
     metadata["model_commit"] = getattr(model.config, "_commit_hash", None)
@@ -925,6 +939,8 @@ def validate_arguments(args):
 
 
 def validate_resume_arguments(previous, current):
+    if previous["environment"].get("linear_kernels") != current["environment"]["linear_kernels"]:
+        raise ValueError("linear attention kernels changed; start a new run instead of resuming")
     if previous["candidates"] != current["candidates"]:
         raise ValueError("resume candidates differ from the interrupted run")
     if previous["input_signatures"] != current["input_signatures"]:
