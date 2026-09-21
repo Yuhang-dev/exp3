@@ -379,6 +379,29 @@ No prompt is truncated. `inputs.pt` retains exact token IDs; every generation sa
 raw token IDs, reasoning text, final text, and termination status before scoring.
 This is a paired diagnostic subset, not an official full-1,899-task leaderboard score.
 
+The 2,048-token greedy run exposed unfinished reasoning. A longest-prompt probe
+then repeated table checks until the 32,768-token cap, so the long-thinking run
+uses the model card's general thinking sampling settings: temperature 1.0,
+top-p 0.95, top-k 20, presence penalty 1.5, and repetition penalty 1.0.
+Presence penalties apply only to already generated tokens. Each method resets
+its CUDA sampling generator to `42 + sample_index`; both use identical settings.
+These sampled results are a separate protocol from the earlier greedy runs.
+
+After inspecting `results/clbench_qwen35_budget32k_sampling_probe`, launch with:
+
+```bash
+bash run_clbench_qwen35_long.sh run
+# Following an interruption:
+bash run_clbench_qwen35_long.sh resume
+```
+
+This entrypoint retains all original 100 task IDs, messages, rubrics, and exact
+prompt token hashes. It changes only their generation cap to 32,768, raises the
+total context ceiling to 98,304, and saves new inputs and outputs in separate
+directories. Outputs are under `results/clbench_qwen35_full100_thinking32k_sampling`.
+Raw reasoning and final answers remain saved; EOS ends generation before the cap.
+Generation records include wall time and peak CUDA allocated/reserved memory.
+
 Official quality grading is a separate paid/API stage (200 judge calls total):
 
 ```bash
