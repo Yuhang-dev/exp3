@@ -116,6 +116,14 @@ def arguments():
         help="Optionally save post-RoPE Q for these layers, or 'all'.",
     )
     parser.add_argument(
+        "--save-pre-rope-q-layers", nargs="+", default=[],
+        help="Save q_proj output before RoPE for these layers, or 'all'.",
+    )
+    parser.add_argument(
+        "--save-layer-input-layers", nargs="+", default=[],
+        help="Save input hidden states before each decoder layer, or 'all'.",
+    )
+    parser.add_argument(
         "--save-v-layers", nargs="+", default=[],
         help="Optionally save V for these layers, or 'all'.",
     )
@@ -739,10 +747,14 @@ class SampleCapture:
         self.model = model
         self.layers = layer_sets["capture"]
         self.save_q_layers = layer_sets["q"]
+        self.save_pre_q_layers = layer_sets["pre_q"]
+        self.save_hidden_layers = layer_sets["hidden"]
         self.save_v_layers = layer_sets["v"]
         self.save_row_mass_layers = layer_sets["row_mass"]
         self.save_output_layers = layer_sets["outputs"]
         self.pending_pre_rope = {}
+        self.pending_pre_q = {}
+        self.pending_hidden = {}
         self.captured_layers = set()
         self.artifacts = []
         self.sample_dir = root / "samples" / _slug(sample["sample_id"])
@@ -790,7 +802,9 @@ class SampleCapture:
             "captured_layers": [],
             "artifact_contract": {
                 "pre_rope_key": "k_proj output reshaped to [tokens, kv_heads, head_dim]",
+                "pre_rope_query": "optional q_proj output before RoPE",
                 "post_rope_key": "the K tensor consumed by V1",
+                "layer_input": "optional hidden states before the decoder layer",
                 "mean_k_v1": "the actual BF16 V1 block_mean_k output",
                 "dense_truth": (
                     "omitted in capture-only mode; recomputed by block_proxy_study.py"
@@ -799,6 +813,8 @@ class SampleCapture:
                     "softmax to [query_block, key_block, query_head]"
                 ),
                 "selected_output": (
+                    "omitted in capture-only mode; reconstructible from saved Q/K/V"
+                    if args.capture_only else
                     "the same dense probabilities restricted to V1-selected blocks and "
                     "renormalized; V affects only this error audit, never routing"
                 ),
@@ -828,14 +844,32 @@ class SampleCapture:
             output.detach()[0].reshape(sequence, kv_heads, head_dim).to("cpu")
         )
 
+    def pre_rope_q_hook(self, layer, output):
+        if layer not in self.save_pre_q_layers:
+            return
+        sequence = output.shape[1]
+        query_heads = self.model.config.num_attention_heads
+        head_dim = output.shape[-1] // query_heads
+        self.pending_pre_q[layer] = (
+            output.detach()[0].reshape(sequence, query_heads, head_dim).to("cpu")
+        )
+
+    def layer_input_hook(self, layer, hidden):
+        if layer in self.save_hidden_layers:
+            self.pending_hidden[layer] = hidden.detach()[0].to("cpu")
+
     def capture_layer(
         self, layer, q, k, v, mean_k, scores, indices, counts, selected, scale
     ):
         if layer not in self.layers:
             return
         print(
-            f"[v1-diag] {self.sample['sample_id']} layer {layer}: "
-            "saving K structure and computing dense oracle",
+            f"[v1-diag] {self.sample['sample_id']} layer {layer}: " +
+            (
+                "saving attention features and V1 route"
+                if self.args.capture_only else
+                "saving K structure and computing dense oracle"
+            ),
             flush=True,
         )
         layer_dir = self.sample_dir / "layers" / f"layer_{layer:02d}"
@@ -867,6 +901,16 @@ class SampleCapture:
             self._save(
                 layer_dir / "query_post_rope.pt", q.detach()[0].to("cpu"),
                 "Post-RoPE Q [tokens, query_heads, head_dim].",
+            )
+        if layer in self.save_pre_q_layers:
+            self._save(
+                layer_dir / "query_pre_rope.pt", self.pending_pre_q.pop(layer),
+                "Q before RoPE [tokens, query_heads, head_dim].",
+            )
+        if layer in self.save_hidden_layers:
+            self._save(
+                layer_dir / "layer_input.pt", self.pending_hidden.pop(layer),
+                "Decoder-layer input [tokens, hidden_size] before layer norms.",
             )
         if layer in self.save_v_layers:
             self._save(
@@ -1247,6 +1291,12 @@ class SampleCapture:
             raise RuntimeError(
                 f"unconsumed pre-RoPE keys for layers {sorted(self.pending_pre_rope)}"
             )
+        if self.pending_pre_q or self.pending_hidden:
+            raise RuntimeError(
+                "unconsumed feature hooks: "
+                f"Q={sorted(self.pending_pre_q)}, "
+                f"hidden={sorted(self.pending_hidden)}"
+            )
         self.block_sink.close()
         self.tile_sink.close()
         self.layer_sink.close()
@@ -1325,6 +1375,12 @@ def main():
     layer_sets = {
         "capture": _layer_set(args.layers, layer_count),
         "q": _layer_set(args.save_q_layers, layer_count, allow_empty=True),
+        "pre_q": _layer_set(
+            args.save_pre_rope_q_layers, layer_count, allow_empty=True
+        ),
+        "hidden": _layer_set(
+            args.save_layer_input_layers, layer_count, allow_empty=True
+        ),
         "v": _layer_set(args.save_v_layers, layer_count, allow_empty=True),
         "row_mass": _layer_set(
             args.save_row_block_mass_layers, layer_count, allow_empty=True
@@ -1333,7 +1389,7 @@ def main():
             args.save_output_vector_layers, layer_count, allow_empty=True
         ),
     }
-    for name in ("q", "v", "row_mass", "outputs"):
+    for name in ("q", "pre_q", "hidden", "v", "row_mass", "outputs"):
         if not layer_sets[name] <= layer_sets["capture"]:
             raise ValueError(f"{name} layers must be included in --layers")
 
@@ -1381,6 +1437,18 @@ def main():
             current_capture["value"].pre_rope_hook(number, output)
 
         handles.append(layer_module.self_attn.k_proj.register_forward_hook(hook))
+        if layer_number in layer_sets["pre_q"]:
+            def q_hook(_module, _inputs, output, number=layer_number):
+                current_capture["value"].pre_rope_q_hook(number, output)
+
+            handles.append(
+                layer_module.self_attn.q_proj.register_forward_hook(q_hook)
+            )
+        if layer_number in layer_sets["hidden"]:
+            def hidden_hook(_module, inputs, number=layer_number):
+                current_capture["value"].layer_input_hook(number, inputs[0])
+
+            handles.append(layer_module.register_forward_pre_hook(hidden_hook))
 
     try:
         backend.configure("fp_v1", args.alpha)

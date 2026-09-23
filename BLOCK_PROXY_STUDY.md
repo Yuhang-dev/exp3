@@ -24,6 +24,8 @@ python -u v1_block_diagnostics.py \
   --layers 0 \
   --capture-only \
   --save-q-layers 0 \
+  --save-pre-rope-q-layers 0 \
+  --save-layer-input-layers 0 \
   --save-v-layers 0
 python -u block_proxy_study.py \
   --capture results/block_proxy_capture_4k \
@@ -33,9 +35,10 @@ python plot_block_proxy_study.py results/block_proxy_pilot_4k
 ~~~
 
 The capture-only mode still runs the actual V1 prefill and saves its route, but
-skips the expensive full-sequence dense oracle. It saves query_post_rope.pt,
-key_post_rope.pt, value.pt, original v1_route.pt, token IDs, token mapping,
-model/input metadata, and per-file hashes. The three legacy summary CSV files
+skips the expensive full-sequence dense oracle. It saves query_pre_rope.pt,
+query_post_rope.pt, key_pre_rope.pt, key_post_rope.pt, value.pt, layer_input.pt,
+original v1_route.pt, token IDs, token mapping, model/input metadata, and
+per-file hashes. The three legacy summary CSV files
 are headers only in this mode. Full Q/K/V remain on the remote disk for later
 output-error and alternate-proxy analysis.
 
@@ -52,6 +55,8 @@ python -u v1_block_diagnostics.py \
   --layers 0 7 14 21 27 \
   --capture-only \
   --save-q-layers 0 7 14 21 27 \
+  --save-pre-rope-q-layers 0 7 14 21 27 \
+  --save-layer-input-layers 0 7 14 21 27 \
   --save-v-layers 0 7 14 21 27
 python -u block_proxy_study.py \
   --capture results/block_proxy_capture_32k \
@@ -68,6 +73,14 @@ rows are sampled evenly within each tile. Default Q heads 0 7 14 21 represent
 the four KV-head groups. Run a denser follow-up with --rows-per-tile 128 and
 additional heads only for the layers, samples, and mechanisms that merit it.
 A new output directory is needed for each analysis configuration.
+
+The Q/K/V and layer-input files preserve every token and every head at the
+listed layers. The offline study only samples four Q heads and 16 query rows
+per selected tile, but that sampling does not discard the captured tensors.
+The extra pre-RoPE Q and layer input add about 4.4 GiB for the two 32K samples
+across five layers on Qwen2.5-7B. Those files allow later comparison of
+pre/post-RoPE QK structure and probing of the representation entering each
+layer. MLP intermediate activations and unlisted layers are not captured.
 
 For a previously saved rich capture, the capture command can be skipped if
 each chosen layer contains query_post_rope.pt and key_post_rope.pt. Pass its
