@@ -92,6 +92,55 @@ python -u block_proxy_study.py \
 python plot_block_proxy_study.py results/ruler_block_proxy_partial_study_32k
 ~~~
 
+## Non-NIAH natural-text mechanism panel
+
+NIAH alone may overrepresent single sharp evidence spikes. The completed
+LongBench v2 116-input run supplies exact saved prompts and paired Dense/V1
+scores from natural documents. `select_longbench_block_proxy_subset.py` picks
+two 24K–32K inputs from each of Single-Document QA, Multi-Document QA,
+Long-dialogue History Understanding, and Code Repository Understanding. The
+selection uses only domain, length, and a fixed hash order; answer outcomes are
+recorded afterward and never influence which inputs enter the panel. This
+panel checks whether block-logit spread, effective support, Jensen gap, and
+mean-key rank failures differ across text structures. Task labels are sampling
+strata, not assumed attention-distribution labels.
+
+~~~bash
+bash -e <<'SH'
+cd /root/autodl-tmp/exp3
+source ./env.sh
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+run_tag=$(date +%Y%m%d_%H%M%S)
+subset_dir="results/longbench_block_proxy_subset_${run_tag}"
+capture_dir="results/longbench_block_proxy_capture_${run_tag}"
+study_dir="results/longbench_block_proxy_study_${run_tag}"
+python -u select_longbench_block_proxy_subset.py \
+  --source results/longbench_v2_native32k_full116 \
+  --out "$subset_dir"
+python -u v1_block_diagnostics.py \
+  --inputs "$subset_dir/inputs.pt" --out "$capture_dir" \
+  --layers 0 14 27 --capture-only \
+  --save-q-layers 0 14 27 \
+  --save-pre-rope-q-layers 0 14 27 \
+  --save-layer-input-layers 0 14 27 \
+  --sample-query-rows-per-tile 16 \
+  --save-v-layers 0 14 27
+python -u block_proxy_study.py \
+  --capture "$capture_dir" --out "$study_dir" \
+  --heads all --detail-heads 0 7 14 21 \
+  --q-block-sizes 64 128 256 --k-block-sizes 32 64 128 256 \
+  --budget-tokens 2048 --rows-per-tile 16
+python plot_block_proxy_study.py "$study_dir"
+echo "Report: $study_dir/block_proxy_report.zip"
+SH
+~~~
+
+Use the original NIAH pilot and this natural panel together for mechanism
+analysis. Read `selection.json` for sample/domain identity, and retain the
+full 116-input evaluation for outcome claims. If the measured distributions
+still cover only sharp peaks, the next controlled RULER contrast is
+aggregation (CWE/FWE), whose evidence is repeated across the context.
+
 ## Historical synthetic 4K smoke
 
 In the remote Jupyter Terminal, after the updated exp3 code is present:
