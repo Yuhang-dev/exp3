@@ -15,6 +15,8 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
+from block_proxy_positions import query_rows, tile_starts
+
 
 SUMMARY_FIELDS = (
     "sample_id", "layer", "query_head", "kv_head", "q_block_size",
@@ -60,7 +62,18 @@ def arguments():
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--sample-id", action="append", default=[])
     parser.add_argument("--layers", nargs="+", type=int)
-    parser.add_argument("--heads", nargs="+", type=int, default=[0, 7, 14, 21])
+    parser.add_argument(
+        "--allow-incomplete-capture", action="store_true",
+        help="Analyze only layers marked complete in a failed capture.",
+    )
+    parser.add_argument(
+        "--heads", nargs="+", default=["0", "7", "14", "21"],
+        help="Query heads to analyze, or 'all' for every Query head.",
+    )
+    parser.add_argument(
+        "--detail-heads", nargs="+", type=int,
+        help="Only these heads write per-block and per-row files; all analyzed heads write summaries.",
+    )
     parser.add_argument("--q-block-sizes", nargs="+", type=int, default=[64, 128, 256])
     parser.add_argument("--k-block-sizes", nargs="+", type=int, default=[32, 64, 128, 256])
     parser.add_argument(
@@ -90,21 +103,6 @@ def align_up(value, size):
 
 def align_down(value, size):
     return value // size * size
-
-
-def tile_starts(sequence, size, fractions):
-    count = sequence // size
-    return sorted({
-        min(count - 1, max(0, int(fraction * count))) * size
-        for fraction in fractions
-    })
-
-
-def query_rows(start, size, sequence, count):
-    end = min(start + size, sequence)
-    if count >= end - start:
-        return torch.arange(start, end)
-    return torch.linspace(start, end - 1, count).round().long().unique()
 
 
 def ranks(values):
@@ -181,7 +179,7 @@ def write_config(
     sample_id, layer, head, kv_head, q_size, k_size, q_start, positions,
     remote_start, remote_end, budget_tokens, logits, probabilities, log_z,
     summary_writer, block_writer, row_writer, profile_file,
-    profiles_per_config,
+    profiles_per_config, save_detail,
 ):
     data = block_arrays(
         logits, probabilities, remote_start, remote_end, k_size
@@ -266,6 +264,9 @@ def write_config(
             ),
             "cutoff_margin": margin.item(),
         })
+
+    if not save_detail:
+        return
 
     raw_rank = ranks(scores["mean_raw"])
     true_rank = ranks(mean_mass)
@@ -419,7 +420,10 @@ def main():
     sample_dirs = sorted((args.capture / "samples").iterdir())
     if args.sample_id:
         sample_dirs = [
-            sample for sample in sample_dirs if sample.name in args.sample_id
+            sample for sample in sample_dirs
+            if json.loads(
+                (sample / "metadata.json").read_text(encoding="utf-8")
+            )["sample_id"] in args.sample_id
         ]
     if not sample_dirs:
         raise ValueError("no captured samples selected")
@@ -442,7 +446,10 @@ def main():
             sample_meta = json.loads(
                 (sample_dir / "metadata.json").read_text(encoding="utf-8")
             )
-            if sample_meta["status"] != "complete":
+            if (
+                sample_meta["status"] != "complete"
+                and not args.allow_incomplete_capture
+            ):
                 raise ValueError(f"incomplete capture: {sample_dir}")
             source_samples.append({
                 "sample_id": sample_meta["sample_id"],
@@ -450,6 +457,10 @@ def main():
                 "capture_layers": sample_meta["captured_layers"],
             })
             layer_dirs = sorted((sample_dir / "layers").glob("layer_*"))
+            layer_dirs = [
+                path for path in layer_dirs
+                if int(path.name.split("_")[-1]) in sample_meta["captured_layers"]
+            ]
             if args.layers is not None:
                 layer_dirs = [
                     path for path in layer_dirs
@@ -469,10 +480,21 @@ def main():
                     layer_dir / "v1_route.pt",
                     map_location="cpu", weights_only=True,
                 )
-                sequence = q.shape[0]
+                sequence = sample_meta["capture_tokens"]
+                query_positions_path = sample_dir / "query_positions.pt"
+                saved_positions = (
+                    torch.load(
+                        query_positions_path, map_location="cpu", weights_only=True
+                    )
+                    if query_positions_path.exists() else None
+                )
                 group = q.shape[1] // k.shape[1]
                 scale = float(route["scale"])
-                for head in args.heads:
+                heads = (
+                    range(q.shape[1]) if args.heads == ["all"]
+                    else [int(head) for head in args.heads]
+                )
+                for head in heads:
                     kv_head = head // group
                     key = k[:, kv_head].to(args.device, dtype=torch.float32)
                     for q_size in args.q_block_sizes:
@@ -489,7 +511,21 @@ def main():
                                 q_start, q_size, sequence,
                                 args.rows_per_tile,
                             )
-                            query = q[positions, head].to(
+                            if saved_positions is None:
+                                query_indices = positions
+                            else:
+                                query_indices = torch.searchsorted(
+                                    saved_positions, positions
+                                )
+                                if not torch.equal(
+                                    saved_positions[query_indices], positions
+                                ):
+                                    raise ValueError(
+                                        "requested query rows were not captured; "
+                                        "match the capture Q sizes, tile fractions, "
+                                        "and rows per tile"
+                                    )
+                            query = q[query_indices, head].to(
                                 args.device, dtype=torch.float32
                             )
                             prefix_end = int(positions[-1]) + 1
@@ -518,6 +554,7 @@ def main():
                                     probabilities, log_z,
                                     summary_writer, block_writer, row_writer,
                                     profiles, args.profiles_per_config,
+                                    args.detail_heads is None or head in args.detail_heads,
                                 )
                             print(
                                 f"[proxy-study] {sample_dir.name} layer {layer} "

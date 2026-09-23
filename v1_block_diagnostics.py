@@ -23,6 +23,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import triton
 
 from attention import AttentionBackend
+from block_proxy_positions import sampled_query_positions
 from data import input_hash
 
 
@@ -122,6 +123,18 @@ def arguments():
     parser.add_argument(
         "--save-layer-input-layers", nargs="+", default=[],
         help="Save input hidden states before each decoder layer, or 'all'.",
+    )
+    parser.add_argument(
+        "--sample-query-rows-per-tile", type=int,
+        help="Save Q and layer-input features only at the study's sampled query rows.",
+    )
+    parser.add_argument(
+        "--sample-query-block-sizes", nargs="+", type=int,
+        default=[64, 128, 256],
+    )
+    parser.add_argument(
+        "--sample-query-tile-fractions", nargs="+", type=float,
+        default=[0.25, 0.5, 0.75, 0.9],
     )
     parser.add_argument(
         "--save-v-layers", nargs="+", default=[],
@@ -757,6 +770,15 @@ class SampleCapture:
         self.pending_hidden = {}
         self.captured_layers = set()
         self.artifacts = []
+        self.query_positions = (
+            sampled_query_positions(
+                len(self.input_ids),
+                args.sample_query_block_sizes,
+                args.sample_query_tile_fractions,
+                args.sample_query_rows_per_tile,
+            )
+            if args.sample_query_rows_per_tile is not None else None
+        )
         self.sample_dir = root / "samples" / _slug(sample["sample_id"])
         self.sample_dir.mkdir(parents=True)
         (self.sample_dir / "layers").mkdir()
@@ -767,6 +789,10 @@ class SampleCapture:
             torch.as_tensor(self.input_ids, dtype=torch.long),
             capture_input_path,
         )
+        if self.query_positions is not None:
+            torch.save(
+                self.query_positions, self.sample_dir / "query_positions.pt"
+            )
         public = {key: value for key, value in sample.items() if key != "input_ids"}
         input_json_path = self.sample_dir / "input.json"
         _write_json(input_json_path, public)
@@ -777,6 +803,11 @@ class SampleCapture:
         self._record_artifact(
             capture_input_path, "Exact token IDs entering this sparse-prefill capture."
         )
+        if self.query_positions is not None:
+            self._record_artifact(
+                self.sample_dir / "query_positions.pt",
+                "Original token indices of every saved Q and layer-input row.",
+            )
         self._record_artifact(input_json_path, "Human-readable source sample metadata.")
         self._record_artifact(
             self.sample_dir / "tokens.jsonl", "Per-token ID, text, block, and offset map."
@@ -799,10 +830,20 @@ class SampleCapture:
             "source_tokens": len(sample["input_ids"]),
             "capture_tokens": len(self.input_ids),
             "capture_boundary": capture_boundary,
+            "query_rows_saved": (
+                len(self.query_positions)
+                if self.query_positions is not None else len(self.input_ids)
+            ),
+            "query_capture_mode": (
+                "sampled" if self.query_positions is not None else "full"
+            ),
             "captured_layers": [],
             "artifact_contract": {
                 "pre_rope_key": "k_proj output reshaped to [tokens, kv_heads, head_dim]",
-                "pre_rope_query": "optional q_proj output before RoPE",
+                "pre_rope_query": (
+                    "optional q_proj output before RoPE; query_positions.pt "
+                    "indexes rows when query_capture_mode is sampled"
+                ),
                 "post_rope_key": "the K tensor consumed by V1",
                 "layer_input": "optional hidden states before the decoder layer",
                 "mean_k_v1": "the actual BF16 V1 block_mean_k output",
@@ -834,6 +875,13 @@ class SampleCapture:
         torch.save(payload, path)
         self._record_artifact(path, description)
 
+    def _query_rows(self, tensor):
+        if self.query_positions is not None:
+            return tensor.index_select(
+                0, self.query_positions.to(tensor.device)
+            )
+        return tensor
+
     def pre_rope_hook(self, layer, output):
         if layer not in self.layers:
             return
@@ -851,12 +899,16 @@ class SampleCapture:
         query_heads = self.model.config.num_attention_heads
         head_dim = output.shape[-1] // query_heads
         self.pending_pre_q[layer] = (
-            output.detach()[0].reshape(sequence, query_heads, head_dim).to("cpu")
+            self._query_rows(
+                output.detach()[0].reshape(sequence, query_heads, head_dim)
+            ).to("cpu")
         )
 
     def layer_input_hook(self, layer, hidden):
         if layer in self.save_hidden_layers:
-            self.pending_hidden[layer] = hidden.detach()[0].to("cpu")
+            self.pending_hidden[layer] = self._query_rows(
+                hidden.detach()[0]
+            ).to("cpu")
 
     def capture_layer(
         self, layer, q, k, v, mean_k, scores, indices, counts, selected, scale
@@ -899,18 +951,19 @@ class SampleCapture:
             )
         if layer in self.save_q_layers:
             self._save(
-                layer_dir / "query_post_rope.pt", q.detach()[0].to("cpu"),
-                "Post-RoPE Q [tokens, query_heads, head_dim].",
+                layer_dir / "query_post_rope.pt",
+                self._query_rows(q.detach()[0]).to("cpu"),
+                "Post-RoPE Q [saved_query_rows, query_heads, head_dim].",
             )
         if layer in self.save_pre_q_layers:
             self._save(
                 layer_dir / "query_pre_rope.pt", self.pending_pre_q.pop(layer),
-                "Q before RoPE [tokens, query_heads, head_dim].",
+                "Q before RoPE [saved_query_rows, query_heads, head_dim].",
             )
         if layer in self.save_hidden_layers:
             self._save(
                 layer_dir / "layer_input.pt", self.pending_hidden.pop(layer),
-                "Decoder-layer input [tokens, hidden_size] before layer norms.",
+                "Decoder-layer input [saved_query_rows, hidden_size] before layer norms.",
             )
         if layer in self.save_v_layers:
             self._save(

@@ -49,9 +49,11 @@ python -u v1_block_diagnostics.py \
   --save-q-layers 0 7 14 21 27 \
   --save-pre-rope-q-layers 0 7 14 21 27 \
   --save-layer-input-layers 0 7 14 21 27 \
+  --sample-query-rows-per-tile 16 \
   --save-v-layers 0 7 14 21 27
 python -u block_proxy_study.py \
   --capture "$capture_dir" --out "$study_dir" \
+  --heads all --detail-heads 0 7 14 21 \
   --q-block-sizes 64 128 256 \
   --k-block-sizes 32 64 128 256 \
   --budget-tokens 2048 --rows-per-tile 16
@@ -62,10 +64,33 @@ SH
 
 The default RULER capture excludes the final prompt token, matching the
 pinned upstream sparse-prefill boundary. Each saved sample records its full
-original input hash and captured-token boundary. Four 32K samples across five
-layers consume substantially more disk than the 4K smoke; the subset, capture,
-and analysis directories are separate so the original RULER evaluation stays
-untouched.
+original input hash and captured-token boundary. This compact configuration
+saves full post-/pre-RoPE K and V, the actual V1 route for all 28 Query heads,
+and Q/hidden states at the union of the 16 sampled rows in each selected Q tile.
+`query_positions.pt` maps those rows back to original token positions. Thus
+the offline block-size study can summarize every Query head without storing all
+32K Q/hidden rows. `--detail-heads` limits the much larger per-block and
+per-row CSVs to one representative head from each KV group; rerun with a
+specific head if the summary exposes a failure. Omit `--sample-query-rows-per-tile` if arbitrary Query
+positions or later full-tile Query analyses are needed. Capture and analysis
+directories are separate so the original RULER evaluation stays untouched.
+
+The interrupted full capture at
+`results/ruler_block_proxy_capture_32k_20260923_154550` can be analyzed after
+storage is available. The study skips its unfinished layer and uses the layers
+recorded complete in each sample's `metadata.json`:
+
+~~~bash
+cd /root/autodl-tmp/exp3
+source ./env.sh
+python -u block_proxy_study.py \
+  --capture results/ruler_block_proxy_capture_32k_20260923_154550 \
+  --out results/ruler_block_proxy_partial_study_32k \
+  --allow-incomplete-capture --heads all --detail-heads 0 7 14 21 \
+  --q-block-sizes 64 128 256 --k-block-sizes 32 64 128 256 \
+  --budget-tokens 2048 --rows-per-tile 16
+python plot_block_proxy_study.py results/ruler_block_proxy_partial_study_32k
+~~~
 
 ## Historical synthetic 4K smoke
 
@@ -142,14 +167,18 @@ SH
 ~~~
 
 Default sampled Q tiles are near 25%, 50%, 75%, and 90% of each sequence; 16
-rows are sampled evenly within each tile. Default Q heads 0 7 14 21 represent
-the four KV-head groups. Run a denser follow-up with --rows-per-tile 128 and
-additional heads only for the layers, samples, and mechanisms that merit it.
+rows are sampled evenly within each tile. The default heads 0 7 14 21 are a
+quick pilot with one Query head from each KV group, while `--heads all` covers
+all 28 Query heads and is needed for the full head-wise study. Run a denser
+follow-up with --rows-per-tile 128 only from a full-Q capture.
 A new output directory is needed for each analysis configuration.
 
-The Q/K/V and layer-input files preserve every token and every head at the
-listed layers. The offline study only samples four Q heads and 16 query rows
-per selected tile, but that sampling does not discard the captured tensors.
+The historical full capture preserves every token and every head in Q/K/V and
+layer-input files at the listed layers. Its default offline study only samples
+four Q heads and 16 query rows per selected tile, but that sampling does not
+discard the captured tensors. The compact RULER capture above deliberately
+saves Q and layer-input only at sampled Query positions; it still saves all
+28 Query heads for those positions and full K/V token sequences.
 The extra pre-RoPE Q and layer input add about 4.4 GiB for the two 32K samples
 across five layers on Qwen2.5-7B. Those files allow later comparison of
 pre/post-RoPE QK structure and probing of the representation entering each
