@@ -85,7 +85,10 @@ def arguments():
     parser.add_argument("--inputs", type=Path, required=True)
     parser.add_argument("--sample-id", action="append", default=[])
     parser.add_argument("--sample-index", action="append", type=int, default=[])
-    parser.add_argument("--all-samples", action="store_true")
+    parser.add_argument(
+        "--all-samples", action="store_true",
+        help="Capture every input; without sample flags, only input index 0 is captured.",
+    )
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--alpha", type=float, default=0.08)
     parser.add_argument("--block-size", type=int, default=128)

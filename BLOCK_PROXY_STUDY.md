@@ -118,7 +118,7 @@ python -u select_longbench_block_proxy_subset.py \
   --source results/longbench_v2_native32k_full116 \
   --out "$subset_dir"
 python -u v1_block_diagnostics.py \
-  --inputs "$subset_dir/inputs.pt" --out "$capture_dir" \
+  --inputs "$subset_dir/inputs.pt" --out "$capture_dir" --all-samples \
   --layers 0 14 27 --capture-only \
   --save-q-layers 0 14 27 \
   --save-pre-rope-q-layers 0 14 27 \
@@ -140,6 +140,22 @@ analysis. Read `selection.json` for sample/domain identity, and retain the
 full 116-input evaluation for outcome claims. If the measured distributions
 still cover only sharp peaks, the next controlled RULER contrast is
 aggregation (CWE/FWE), whose evidence is repeated across the context.
+
+The command in commit `59b175d` omitted `--all-samples`; the capture therefore
+processed only subset index 0, not all eight selected inputs. The returned
+`longbench_block_proxy_study_20260923_174053_355052878` report confirms one
+Single-Document QA sample at layers 0/14/27. Preserve that valid capture and
+complete indices 1–7 with:
+
+~~~bash
+cd /root/autodl-tmp/exp3
+git pull --ff-only
+bash run_longbench_block_proxy_remaining.sh
+~~~
+
+This reads the original timestamped eight-input subset, captures only the
+seven remaining inputs, and writes fresh `longbench_block_proxy_*_remaining_*`
+directories. Combine its report with the existing one-sample report afterward.
 
 ## Historical synthetic 4K smoke
 
