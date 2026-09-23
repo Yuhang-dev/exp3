@@ -93,6 +93,13 @@ def arguments():
     parser.add_argument("--last-full-blocks", type=int, default=2)
     parser.add_argument("--query-chunk", type=int, default=128)
     parser.add_argument(
+        "--capture-only", action="store_true",
+        help=(
+            "Skip the dense oracle; save tensors selected by --save-q-layers "
+            "and --save-v-layers alongside V1 routing."
+        ),
+    )
+    parser.add_argument(
         "--include-ruler-final-token",
         action="store_true",
         help=(
@@ -771,6 +778,7 @@ class SampleCapture:
         self.metadata_path = self.sample_dir / "metadata.json"
         self.metadata = {
             "status": "running",
+            "capture_only": args.capture_only,
             "sample_id": sample["sample_id"],
             "source_input_sha256": sample.get(
                 "input_sha256", input_hash(sample["input_ids"])
@@ -785,6 +793,8 @@ class SampleCapture:
                 "post_rope_key": "the K tensor consumed by V1",
                 "mean_k_v1": "the actual BF16 V1 block_mean_k output",
                 "dense_truth": (
+                    "omitted in capture-only mode; recomputed by block_proxy_study.py"
+                    if args.capture_only else
                     "causal token-level softmax over every K token, aggregated only after "
                     "softmax to [query_block, key_block, query_head]"
                 ),
@@ -887,6 +897,32 @@ class SampleCapture:
             layer_dir / "mean_k_v1.pt", actual_mean,
             "Exact mean-pooled BF16 K used by V1.",
         )
+
+        if self.args.capture_only:
+            self._save(
+                layer_dir / "v1_route.pt",
+                {
+                    "v1_proxy_score": score_cpu,
+                    "selected_mask": selected_cpu,
+                    "protected_mask": protected,
+                    "routed_mask": routed,
+                    "causal_mask": causal,
+                    "indices": indices_cpu,
+                    "counts": counts_cpu,
+                    "alpha": self.args.alpha,
+                    "scale": scale,
+                },
+                "V1 routing without a dense oracle; offline analysis uses raw Q/K/V.",
+            )
+            self.captured_layers.add(layer)
+            self.metadata["captured_layers"] = sorted(self.captured_layers)
+            _write_json(self.metadata_path, self.metadata)
+            print(
+                f"[v1-diag] {self.sample['sample_id']} layer {layer}: "
+                "Q/K/V and route capture complete",
+                flush=True,
+            )
+            return
 
         oracle = _dense_oracle(
             q,
@@ -1303,7 +1339,11 @@ def main():
 
     metadata = {
         "status": "running",
-        "purpose": "V1-only block structure and dense-routing ground-truth capture",
+        "purpose": (
+            "V1 Q/K/V and routing capture for offline block-size study"
+            if args.capture_only else
+            "V1-only block structure and dense-routing ground-truth capture"
+        ),
         "arguments": vars(args),
         "input_file": str(args.inputs.resolve()),
         "input_file_sha256": _source_hash(args.inputs),
