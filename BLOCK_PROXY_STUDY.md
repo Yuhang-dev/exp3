@@ -10,7 +10,64 @@ study; its diagnostic runtime is not prefill latency.
 The scripts use the existing /root/autodl-tmp/conda/envs/exp1 environment from
 env.sh. Data directories below are new, so existing runs remain intact.
 
-## First 4K run
+## Primary study: saved RULER 32K prompts
+
+The 4K synthetic run below only checked that capture and analysis execute. Use
+the already completed `results/ruler_32k_pilot20/inputs.pt` for research
+results. `select_ruler_block_proxy_subset.py` copies eight original prompts
+and exact token IDs into an immutable subset, with source/selection hashes and
+the dense/V1 score pairs. It includes the four cases where dense and V1 scores
+differ, plus one both-correct control from each of the four RULER task families.
+This is an outcome-stratified **mechanism** subset, not a benchmark sample.
+No synthetic text or new RULER generation enters the subset.
+
+First capture two matched pairs: a one-answer multikey case that V1 gets wrong
+and a nearby-position correct control, plus a four-answer multiquery case where
+V1 misses one answer and a correct control. All four are original 32K pilot
+inputs. The other four subset inputs remain available for a separate capture.
+
+~~~bash
+bash -e <<'SH'
+cd /root/autodl-tmp/exp3
+source ./env.sh
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+run_tag=$(date +%Y%m%d_%H%M%S)
+subset_dir="results/ruler_block_proxy_subset_32k_${run_tag}"
+capture_dir="results/ruler_block_proxy_capture_32k_${run_tag}"
+study_dir="results/ruler_block_proxy_study_32k_${run_tag}"
+python -u select_ruler_block_proxy_subset.py \
+  --source results/ruler_32k_pilot20 \
+  --out "$subset_dir"
+python -u v1_block_diagnostics.py \
+  --inputs "$subset_dir/inputs.pt" \
+  --sample-id 'ruler_niah_mk_1:32768:71' \
+  --sample-id 'ruler_niah_mk_1:32768:56' \
+  --sample-id 'ruler_niah_mq:32768:59' \
+  --sample-id 'ruler_niah_mq:32768:21' \
+  --out "$capture_dir" \
+  --layers 0 7 14 21 27 --capture-only \
+  --save-q-layers 0 7 14 21 27 \
+  --save-pre-rope-q-layers 0 7 14 21 27 \
+  --save-layer-input-layers 0 7 14 21 27 \
+  --save-v-layers 0 7 14 21 27
+python -u block_proxy_study.py \
+  --capture "$capture_dir" --out "$study_dir" \
+  --q-block-sizes 64 128 256 \
+  --k-block-sizes 32 64 128 256 \
+  --budget-tokens 2048 --rows-per-tile 16
+python plot_block_proxy_study.py "$study_dir"
+echo "Report: $study_dir/block_proxy_report.zip"
+SH
+~~~
+
+The default RULER capture excludes the final prompt token, matching the
+pinned upstream sparse-prefill boundary. Each saved sample records its full
+original input hash and captured-token boundary. Four 32K samples across five
+layers consume substantially more disk than the 4K smoke; the subset, capture,
+and analysis directories are separate so the original RULER evaluation stays
+untouched.
+
+## Historical synthetic 4K smoke
 
 In the remote Jupyter Terminal, after the updated exp3 code is present:
 
@@ -52,7 +109,7 @@ offline mode avoids a Hugging Face metadata request. The timestamped directories
 preserve previous attempts, and `bash -e` stops before analysis or plotting if
 capture fails.
 
-## 32K study on existing calibration prompts
+## Historical synthetic 32K plan (superseded by RULER)
 
 ~~~bash
 bash -e <<'SH'
