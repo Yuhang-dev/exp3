@@ -1343,8 +1343,6 @@ def main():
         raise ValueError("--query-chunk must be a multiple of the 128-token block size")
     if (args.out / "metadata.json").exists():
         raise FileExistsError(f"refusing to overwrite existing capture: {args.out}")
-    args.out.mkdir(parents=True, exist_ok=True)
-    (args.out / "samples").mkdir()
 
     inputs = torch.load(args.inputs, map_location="cpu", weights_only=False)
     for sample in inputs:
@@ -1425,6 +1423,8 @@ def main():
             "It is not a latency benchmark and must not enter prefill timing reports."
         ),
     }
+    args.out.mkdir(parents=True, exist_ok=True)
+    (args.out / "samples").mkdir()
     _write_json(args.out / "metadata.json", metadata)
 
     current_capture = {"value": None}

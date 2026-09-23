@@ -15,12 +15,17 @@ env.sh. Data directories below are new, so existing runs remain intact.
 In the remote Jupyter Terminal, after the updated exp3 code is present:
 
 ~~~bash
+bash -e <<'SH'
 cd /root/autodl-tmp/exp3
 source ./env.sh
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+run_tag=$(date +%Y%m%d_%H%M%S)
+capture_dir="results/block_proxy_capture_4k_${run_tag}"
+study_dir="results/block_proxy_pilot_4k_${run_tag}"
 python -u v1_block_diagnostics.py \
   --inputs results/quick/inputs.pt \
   --sample-id synthetic-quick-4096-0-multi_key \
-  --out results/block_proxy_capture_4k \
+  --out "$capture_dir" \
   --layers 0 \
   --capture-only \
   --save-q-layers 0 \
@@ -28,10 +33,11 @@ python -u v1_block_diagnostics.py \
   --save-layer-input-layers 0 \
   --save-v-layers 0
 python -u block_proxy_study.py \
-  --capture results/block_proxy_capture_4k \
-  --out results/block_proxy_pilot_4k \
+  --capture "$capture_dir" \
+  --out "$study_dir" \
   --budget-tokens 512
-python plot_block_proxy_study.py results/block_proxy_pilot_4k
+python plot_block_proxy_study.py "$study_dir"
+SH
 ~~~
 
 The capture-only mode still runs the actual V1 prefill and saves its route, but
@@ -41,17 +47,26 @@ original v1_route.pt, token IDs, token mapping, model/input metadata, and
 per-file hashes. The three legacy summary CSV files
 are headers only in this mode. Full Q/K/V remain on the remote disk for later
 output-error and alternate-proxy analysis.
+The Qwen2.5 model and tokenizer are already cached by the earlier remote runs;
+offline mode avoids a Hugging Face metadata request. The timestamped directories
+preserve previous attempts, and `bash -e` stops before analysis or plotting if
+capture fails.
 
 ## 32K study on existing calibration prompts
 
 ~~~bash
+bash -e <<'SH'
 cd /root/autodl-tmp/exp3
 source ./env.sh
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+run_tag=$(date +%Y%m%d_%H%M%S)
+capture_dir="results/block_proxy_capture_32k_${run_tag}"
+study_dir="results/block_proxy_mechanism_32k_${run_tag}"
 python -u v1_block_diagnostics.py \
   --inputs results/calibration_sweep_32k/inputs.pt \
   --sample-id synthetic-calibration-32768-0-multi_key \
   --sample-id synthetic-calibration-32768-4-multi_query \
-  --out results/block_proxy_capture_32k \
+  --out "$capture_dir" \
   --layers 0 7 14 21 27 \
   --capture-only \
   --save-q-layers 0 7 14 21 27 \
@@ -59,13 +74,14 @@ python -u v1_block_diagnostics.py \
   --save-layer-input-layers 0 7 14 21 27 \
   --save-v-layers 0 7 14 21 27
 python -u block_proxy_study.py \
-  --capture results/block_proxy_capture_32k \
-  --out results/block_proxy_mechanism_32k \
+  --capture "$capture_dir" \
+  --out "$study_dir" \
   --q-block-sizes 64 128 256 \
   --k-block-sizes 32 64 128 256 \
   --budget-tokens 2048 \
   --rows-per-tile 16
-python plot_block_proxy_study.py results/block_proxy_mechanism_32k
+python plot_block_proxy_study.py "$study_dir"
+SH
 ~~~
 
 Default sampled Q tiles are near 25%, 50%, 75%, and 90% of each sequence; 16
