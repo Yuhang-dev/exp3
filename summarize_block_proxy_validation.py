@@ -15,7 +15,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from scipy.stats import mannwhitneyu, spearmanr
 
 
 TILE = ["panel", "sample_id", "layer", "query_head", "q_start"]
@@ -30,6 +29,10 @@ RNG = np.random.default_rng(20260924)
 
 def read(out, name):
     return pd.read_csv(out / "raw" / f"{name}.csv.gz")
+
+
+def spearman(a, b):
+    return a.rank().corr(b.rank())
 
 
 def group_masks(frame):
@@ -56,8 +59,10 @@ def bootstrap_difference(frame, metric, first, second, reps=2000):
         values.append(a - b)
     point = x[first].mean() - x[second].mean()
     low, high = np.nanquantile(values, [0.025, 0.975])
-    u = mannwhitneyu(x[first], x[second]).statistic
-    cliff = 2 * u / (first.sum() * second.sum()) - 1
+    ranked = pd.Series(np.concatenate([x[first], x[second]])).rank().to_numpy()
+    n1, n2 = first.sum(), second.sum()
+    u = ranked[:n1].sum() - n1 * (n1 + 1) / 2
+    cliff = 2 * u / (n1 * n2) - 1
     return point, low, high, cliff
 
 
@@ -327,8 +332,8 @@ def main():
                for stat in ("mean", "median")},
             "p90_rel_err": frame.rel_err.quantile(0.9),
             "abs_e_par_gt_e_perp_frac": (frame.e_par.abs() > frame.e_perp).mean(),
-            "spearman_mass_loss_rel_err": spearmanr(frame.mass_loss_row[valid], frame.rel_err[valid])[0] if valid.sum() > 2 else np.nan,
-            "spearman_mass_regret_rel_err": spearmanr(frame.mass_regret_row[valid], frame.rel_err[valid])[0] if valid.sum() > 2 else np.nan,
+            "spearman_mass_loss_rel_err": spearman(frame.mass_loss_row[valid], frame.rel_err[valid]) if valid.sum() > 2 else np.nan,
+            "spearman_mass_regret_rel_err": spearman(frame.mass_regret_row[valid], frame.rel_err[valid]) if valid.sum() > 2 else np.nan,
         })
     e6 = pd.DataFrame(rows).merge(
         oproj.groupby(["panel", "layer", "method"]).agg(
