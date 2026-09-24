@@ -5,7 +5,7 @@ import re
 import string
 
 
-SCORER_VERSION = "exp3-scorers-v4-2026-09-20"
+SCORER_VERSION = "exp3-scorers-v5-2026-09-25"
 
 
 def normalize_answer(text):
@@ -109,6 +109,40 @@ def score_ruler(prediction, answers, scorer_prefix):
     }
 
 
+def parse_ruler_output(output, prefix="Answer:"):
+    """FlashPrefill ruler/utils.py parse_output (baa6120)."""
+    patterns = [
+        re.compile(f"(?:{prefix})(.*)(?:\n|$)", flags=re.IGNORECASE),
+        re.compile(r"(?:^)(.*)(?:\n|$)"),
+    ]
+    for pattern in patterns:
+        match = pattern.search(output)
+        if match is not None:
+            return re.sub(f"^{re.escape(prefix)}", "", match[1].strip(), flags=re.IGNORECASE).strip()
+    return None
+
+
+def score_ruler_qa(prediction, answers, scorer_prefix):
+    """RULER qa_1/qa_2: upstream default_post_process substring_exact_match, max over raw and parsed."""
+    scorer_text = scorer_prefix + prediction
+    parsed = parse_ruler_output(scorer_text)
+    texts = [scorer_text] + ([parsed] if parsed is not None else [])
+    hit = max(
+        float(any(normalize_answer(answer) in normalize_answer(text) for answer in answers))
+        for text in texts
+    )
+    return {
+        "metric": "ruler_qa_substring_exact_match",
+        "scorer_version": SCORER_VERSION,
+        "score": 100.0 * hit,
+        "exact_match": hit,
+        "parsed_answer": parsed,
+        "target_accuracy": hit,
+        "all_target_em": hit,
+        "scorer_text": scorer_text,
+    }
+
+
 def score_longbench_v2(prediction, answers):
     """Mirror LongBench v2 pred.py's exact answer extraction."""
     response = prediction.replace("*", "")
@@ -134,6 +168,8 @@ def score_prediction(sample, prediction):
         return score_synthetic(prediction, sample["answers"], sample["target_keys"])
     if sample["task"] == "hotpotqa":
         return score_hotpotqa(prediction, sample["answers"])
+    if sample["task"] == "ruler" and sample["variant"].startswith("ruler_qa"):
+        return score_ruler_qa(prediction, sample["answers"], sample["scorer_prefix"])
     if sample["task"] == "ruler":
         return score_ruler(prediction, sample["answers"], sample["scorer_prefix"])
     if sample["task"] == "longbench_v2":

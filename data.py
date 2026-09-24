@@ -19,26 +19,47 @@ RULER_REPO = "aldjalkdf/ruler"
 RULER_REVISION = "2a9d66ecfcdbcaa72d692b6e89d1fb3325e7d634"
 RULER_FLASH_PREFILL_COMMIT = "baa612047433a992a00d07dc178205eed065ae14"
 RULER_TASK_SPECS = {
-    "ruler_niah_mk_1": {
-        "dataset": "niah_multikey_1",
-        "generation_max_tokens": 50,
-        "plural": False,
-    },
-    "ruler_niah_mk_2": {
-        "dataset": "niah_multikey_2",
-        "generation_max_tokens": 50,
-        "plural": False,
-    },
-    "ruler_niah_mk_3": {
-        "dataset": "niah_multikey_3",
-        "generation_max_tokens": 100,
-        "plural": False,
-    },
-    "ruler_niah_mq": {
-        "dataset": "niah_multiquery",
-        "generation_max_tokens": 100,
-        "plural": True,
-    },
+    # FlashPrefill ruler/configs/ruler_32k.yaml (baa6120): dataset and generation_max_length.
+    "ruler_niah_mk_1": {"dataset": "niah_multikey_1", "generation_max_tokens": 50, "template": "niah"},
+    "ruler_niah_mk_2": {"dataset": "niah_multikey_2", "generation_max_tokens": 50, "template": "niah"},
+    "ruler_niah_mk_3": {"dataset": "niah_multikey_3", "generation_max_tokens": 100, "template": "niah"},
+    "ruler_niah_mq": {"dataset": "niah_multiquery", "generation_max_tokens": 100, "template": "niah_plural"},
+    "ruler_niah_mv": {"dataset": "niah_multivalue", "generation_max_tokens": 50, "template": "niah_plural"},
+    "ruler_niah_s_1": {"dataset": "niah_single_1", "generation_max_tokens": 50, "template": "niah"},
+    "ruler_niah_s_2": {"dataset": "niah_single_2", "generation_max_tokens": 50, "template": "niah"},
+    "ruler_niah_s_3": {"dataset": "niah_single_3", "generation_max_tokens": 50, "template": "niah"},
+    "ruler_cwe": {"dataset": "cwe", "generation_max_tokens": 100, "template": "cwe"},
+    "ruler_fwe": {"dataset": "fwe", "generation_max_tokens": 50, "template": "fwe"},
+    "ruler_vt": {"dataset": "vt", "generation_max_tokens": 50, "template": "vt"},
+    "ruler_qa_1": {"dataset": "qa_1", "generation_max_tokens": 50, "template": "qa"},
+    "ruler_qa_2": {"dataset": "qa_2", "generation_max_tokens": 50, "template": "qa"},
+}
+# FlashPrefill ruler/data.py load_ruler (baa6120): (user_template, system_template).
+RULER_TEMPLATES = {
+    "niah_plural": (
+        "Some special magic {type_needle_v} are hidden within the following text. Make sure to memorize it. I will quiz you about the {type_needle_v} afterwards.\n{context}\nWhat are all the special magic {type_needle_v} for {query} mentioned in the provided text?",
+        "The special magic {type_needle_v} for {query} mentioned in the provided text are",
+    ),
+    "niah": (
+        "A special magic {type_needle_v} is hidden within the following text. Make sure to memorize it. I will quiz you about the {type_needle_v} afterwards.\n{context}\nWhat is the special magic {type_needle_v} for {query} mentioned in the provided text?",
+        "The special magic {type_needle_v} for {query} mentioned in the provided text is",
+    ),
+    "vt": (
+        "{example}Memorize and track the chain(s) of variable assignment hidden in the following text.\n\n{context}\nQuestion: Find all variables that are assigned the value {query} in the text above.",
+        "Answer: According to the chain(s) of variable assignment in the text above, {num_v} variables are assigned the value {query}, they are:",
+    ),
+    "cwe": (
+        "{example}Below is a numbered list of words. In these words, some appear more often than others. Memorize the ones that appear most often.\n{context}\nQuestion: What are the 10 most common words in the above list?",
+        "Answer: The top 10 words that appear most often in the list are:",
+    ),
+    "fwe": (
+        "Read the following coded text and track the frequency of each coded word. Find the three most frequently appeared coded words.\n{context}\nQuestion: Do not provide any explanation. Please ignore the dots '....'. What are the three most frequently appeared words in the above coded text?",
+        "Answer: According to the coded text above, the three most frequently appeared words are:",
+    ),
+    "qa": (
+        "Answer the question based on the given documents. Only give me the answer and do not output any other words.\n\nThe following are given documents.\n\n{context}\n\nAnswer the question based on the given documents. Only give me the answer and do not output any other words.\n\nQuestion: {question}",
+        "Answer:",
+    ),
 }
 RULER_TASKS = tuple(RULER_TASK_SPECS)
 HOTPOT_PROMPT = (
@@ -300,29 +321,16 @@ def _archive_revision(path):
 
 
 def _ruler_prompt(spec, row, context):
-    needle_type = row["type_needle_v"]
-    query = row["query"]
-    if spec["plural"]:
-        user = (
-            f"Some special magic {needle_type} are hidden within the following text. "
-            f"Make sure to memorize it. I will quiz you about the {needle_type} afterwards.\n"
-            f"{context}\n"
-            f"What are all the special magic {needle_type} for {query} mentioned in the provided text?"
-        )
-        prefix = (
-            f"The special magic {needle_type} for {query} mentioned in the provided text are"
-        )
-    else:
-        user = (
-            f"A special magic {needle_type} is hidden within the following text. "
-            f"Make sure to memorize it. I will quiz you about the {needle_type} afterwards.\n"
-            f"{context}\n"
-            f"What is the special magic {needle_type} for {query} mentioned in the provided text?"
-        )
-        prefix = (
-            f"The special magic {needle_type} for {query} mentioned in the provided text is"
-        )
-    return user + "\n" + prefix, prefix
+    """Upstream process_example + prompt_template.format(**example)."""
+    fields = {
+        **row,
+        "context": context,
+        "question": row["query"] if "query" in row else row.get("question", ""),
+        "example": row["example"] + "\n\n" if row.get("example") else "",
+    }
+    user, system = RULER_TEMPLATES[spec["template"]]
+    prefix = system.format(**fields)
+    return user.format(**fields) + "\n" + prefix, prefix
 
 
 def _tokenize_ruler_prompt(tokenizer, spec, row, prompt_budget):
@@ -405,7 +413,7 @@ def prepare_ruler(tokenizer, tasks, split, seed, total_budgets, samples, max_new
                 source_row_index, source_row_sha256, row = source_rows[int(selected_index)]
                 prepared = _tokenize_ruler_prompt(tokenizer, spec, row, prompt_budget)
                 token_ids = prepared["token_ids"]
-                answers = [str(answer) for answer in row["answer"]]
+                answers = [str(answer) for answer in (row["answer"] if "answer" in row else row["outputs"])]
                 source_id = f"{task}:{total_budget}:{source_row_index}"
                 inputs.append({
                     "task": "ruler",
@@ -420,7 +428,7 @@ def prepare_ruler(tokenizer, tasks, split, seed, total_budgets, samples, max_new
                     "total_context_budget": total_budget,
                     "prompt_budget": prompt_budget,
                     "actual_tokens": len(token_ids),
-                    "question": str(row["query"]),
+                    "question": str(row["query"] if "query" in row else row["question"]),
                     "answers": answers,
                     "expected_format": prepared["prefix"] + " " + ", ".join(answers),
                     "scorer_prefix": prepared["prefix"],
