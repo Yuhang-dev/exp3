@@ -31,6 +31,18 @@ def read(out, name):
     return pd.read_csv(out / "raw" / f"{name}.csv.gz")
 
 
+def string_keys(value):
+    """pandas to_dict on grouped frames yields tuple keys; JSON needs strings."""
+    if isinstance(value, dict):
+        return {
+            "/".join(map(str, key)) if isinstance(key, tuple) else str(key): string_keys(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [string_keys(item) for item in value]
+    return value
+
+
 def spearman(a, b):
     return a.rank().corr(b.rank())
 
@@ -441,7 +453,7 @@ def main():
         "e4_spike_median_n_eff_row": spikes.groupby("layer").n_eff_row.median().to_dict(),
     }
 
-    (out / "summary.json").write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
+    (out / "summary.json").write_text(json.dumps(string_keys(summary), indent=2, default=str), encoding="utf-8")
     archive = out.with_name(out.name + "_report.zip")
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
         for path in sorted(out.rglob("*")):
