@@ -52,7 +52,10 @@ def arguments():
         choices=BFCL_CATEGORIES,
         default=DEFAULT_BFCL_CATEGORY,
     )
-    parser.add_argument("--methods", nargs="+", choices=("dense", "fp_v1"), default=["dense", "fp_v1"])
+    parser.add_argument(
+        "--methods", nargs="+",
+        choices=("dense", "fp_v1", "fp_v1_rescue", "fp_v1_rescue_v2"), default=["dense", "fp_v1"],
+    )
     parser.add_argument("--samples", type=int, default=20)
     parser.add_argument(
         "--selected-cases",
@@ -139,9 +142,9 @@ def candidate(method, alpha):
         return {"method": "dense", "alpha": None, "config_id": "dense"}
     alpha_label = f"{alpha:g}".replace("-", "m").replace(".", "p")
     return {
-        "method": "fp_v1",
+        "method": method,
         "alpha": alpha,
-        "config_id": f"fp_v1__a{alpha_label}",
+        "config_id": f"{method}__a{alpha_label}",
     }
 
 

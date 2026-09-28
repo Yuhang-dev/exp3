@@ -230,6 +230,85 @@ def mean_tail(
     return output, lse
 
 
+def rescue_tail(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    selected: torch.Tensor,
+    scale: float,
+    block_size: int = BLOCK_SIZE,
+    chunk_tiles: int = 8,
+    remainder: bool = False,
+):
+    """Exact attention to one rescue token per unselected full-history block, in FP32.
+
+    For query tile t and head h, the rescue token of key block b is argmax_j qbar_{t,h}.k_j with
+    qbar the tile's mean query: sum_i exp(q_i.k_j) >= n exp(qbar.k_j), so it is the token with the
+    largest Jensen lower bound on its tile-aggregated mass. Splitting it off tightens the block's
+    Jensen bound to the remainder's gap. With ``remainder`` the other B-1 tokens of the block also
+    enter through their mean K/V with multiplicity B-1 (the FlashPrefill-V2 zero-order term on the
+    remainder). Returns output and natural-log LSE over these entries only, to be merged with the
+    exact block path by ``merge_exact_mean``.
+    """
+    batch, sequence, q_heads, head_dim = q.shape
+    kv_heads = k.shape[2]
+    group = q_heads // kv_heads
+    blocks = math.ceil(sequence / block_size)
+    padding = blocks * block_size - sequence
+    k_blocks = F.pad(k, (0, 0, 0, 0, 0, padding)).float().view(batch, blocks, block_size, kv_heads, head_dim)
+    v_blocks = F.pad(v, (0, 0, 0, 0, 0, padding)).float().view(batch, blocks, block_size, kv_heads, head_dim)
+    head_kv = torch.arange(q_heads, device=q.device) // group
+    if remainder:
+        k_sum = k_blocks.sum(dim=2)[:, :, head_kv].permute(0, 2, 1, 3)
+        v_sum = v_blocks.sum(dim=2)[:, :, head_kv].permute(0, 2, 1, 3)
+    selected_by_head = selected.permute(0, 1, 3, 2)
+    key_ids = torch.arange(blocks, device=q.device)
+    batch_ids = torch.arange(batch, device=q.device).view(batch, 1, 1, 1)
+    block_ids = key_ids.view(1, 1, 1, blocks)
+    kv_ids = head_kv.view(1, 1, q_heads, 1)
+    output = torch.zeros(batch, sequence, q_heads, head_dim, dtype=torch.float32, device=q.device)
+    lse = torch.full((batch, sequence, q_heads), float("-inf"), dtype=torch.float32, device=q.device)
+
+    for first_tile in range(0, blocks, chunk_tiles):
+        tile_count = min(chunk_tiles, blocks - first_tile)
+        row_start = first_tile * block_size
+        row_end = min(sequence, (first_tile + tile_count) * block_size)
+        rows = row_end - row_start
+        q_tiles = F.pad(q[:, row_start:row_end].float(), (0, 0, 0, 0, 0, tile_count * block_size - rows))
+        q_tiles = q_tiles.view(batch, tile_count, block_size, q_heads, head_dim)
+        tile_rows = torch.full((tile_count,), block_size, dtype=torch.float32, device=q.device)
+        tile_rows[-1] = rows - (tile_count - 1) * block_size
+        q_mean = q_tiles.sum(dim=2) / tile_rows.view(1, -1, 1, 1)
+        token_scores = torch.einsum(
+            "btkgd,bnjkd->btkgnj",
+            q_mean.view(batch, tile_count, kv_heads, group, head_dim),
+            k_blocks,
+        )
+        choice = token_scores.argmax(dim=-1).view(batch, tile_count, q_heads, blocks)
+        k_rescue = k_blocks[batch_ids, block_ids, choice, kv_ids]
+        v_rescue = v_blocks[batch_ids, block_ids, choice, kv_ids]
+
+        tiles = first_tile + torch.arange(tile_count, device=q.device)
+        tail = (key_ids.view(1, 1, 1, blocks) < tiles.view(1, -1, 1, 1)) & ~selected_by_head[:, tiles]
+        logits = torch.einsum("btrhd,bthnd->btrhn", q_tiles, k_rescue) * scale
+        values = v_rescue
+        mask = tail.unsqueeze(2)
+        if remainder:
+            k_rest = (k_sum.unsqueeze(1) - k_rescue) / (block_size - 1)
+            v_rest = (v_sum.unsqueeze(1) - v_rescue) / (block_size - 1)
+            rest_logits = torch.einsum("btrhd,bthnd->btrhn", q_tiles, k_rest) * scale
+            logits = torch.cat((logits, rest_logits + math.log(block_size - 1)), dim=-1)
+            values = torch.cat((values, v_rest), dim=3)
+            mask = torch.cat((mask, mask), dim=-1)
+        masked = logits.masked_fill(~mask, float("-inf"))
+        chunk_lse = torch.logsumexp(masked, dim=-1)
+        weights = torch.where(mask, torch.exp(masked - chunk_lse.unsqueeze(-1)), 0.0)
+        chunk_output = torch.einsum("btrhn,bthnd->btrhd", weights, values)
+        output[:, row_start:row_end] = chunk_output.reshape(batch, -1, q_heads, head_dim)[:, :rows]
+        lse[:, row_start:row_end] = chunk_lse.reshape(batch, -1, q_heads)[:, :rows]
+    return output, lse
+
+
 def merge_exact_mean(
     exact_output: torch.Tensor,
     exact_lse: torch.Tensor,
@@ -291,7 +370,8 @@ def selection_accounting(
             * k_iterations
         ).sum()
     mean_method = method in {
-        "mean_native", "mean_balanced", "cgf_mean", "dispersion_mean"
+        "mean_native", "mean_balanced", "cgf_mean", "dispersion_mean",
+        "fp_v1_rescue", "fp_v1_rescue_v2",
     }
     executed_mean_entries = batch * sequence * heads * blocks if mean_method else 0
     selector_executed_entries = 0
@@ -299,7 +379,7 @@ def selection_accounting(
     if method in {"mean_balanced", "cgf_mean", "dispersion_mean"}:
         descriptor_dots = 1 if method == "mean_balanced" else 2
         selector_executed_entries = batch * sequence * heads * blocks * descriptor_dots
-    elif method in {"fp_v1", "mean_native"} and score_k_tile_size is not None:
+    elif method in {"fp_v1", "mean_native", "fp_v1_rescue", "fp_v1_rescue_v2"} and score_k_tile_size is not None:
         selector_physical_tiles = sum(
             math.ceil((query_block + 1) / score_k_tile_size)
             for query_block in range(blocks)

@@ -119,6 +119,49 @@ def explicit_mean_reference(q, k, v, selected, descriptors, scale):
     return output, total_lse
 
 
+def explicit_rescue_reference(q, k, v, selected, scale, remainder):
+    """Token-mask reference for exact selected blocks plus rescue tokens (batch 1).
+
+    Each unselected full-history block of a query tile adds its argmax_j qbar.k_j token, and with
+    ``remainder`` also its other B-1 tokens through their mean K/V with multiplicity B-1.
+    """
+    _, sequence, heads, _ = q.shape
+    block = kernels.BLOCK_SIZE
+    group = heads // k.shape[2]
+    keys = k[0].repeat_interleave(group, dim=1).float()
+    values = v[0].repeat_interleave(group, dim=1).float()
+    queries = q[0].float()
+    key_positions = torch.arange(sequence, device=q.device)
+    output = torch.zeros(sequence, heads, q.shape[3], device=q.device)
+    lse = torch.zeros(sequence, heads, device=q.device)
+    for tile in range(selected.shape[1]):
+        rows = torch.arange(tile * block, min(sequence, (tile + 1) * block), device=q.device)
+        for head in range(heads):
+            allowed = selected[0, tile, key_positions // block, head][None, :] & (key_positions[None, :] <= rows[:, None])
+            logits = [(queries[rows, head] @ keys[:, head].T * scale).masked_fill(~allowed, float("-inf"))]
+            parts = [values[:, head]]
+            qbar = queries[rows, head].mean(dim=0)
+            for key_block in range(tile):
+                if selected[0, tile, key_block, head]:
+                    continue
+                span = slice(key_block * block, (key_block + 1) * block)
+                block_keys, block_values = keys[span, head], values[span, head]
+                choice = torch.argmax(block_keys @ qbar)
+                logits.append(queries[rows, head] @ block_keys[choice][:, None] * scale)
+                parts.append(block_values[choice][None])
+                if remainder:
+                    rest = torch.arange(block, device=q.device) != choice
+                    logits.append(
+                        queries[rows, head] @ block_keys[rest].mean(dim=0)[:, None] * scale
+                        + torch.log(torch.tensor(block - 1.0))
+                    )
+                    parts.append(block_values[rest].mean(dim=0)[None])
+            logits = torch.cat(logits, dim=1)
+            lse[rows, head] = torch.logsumexp(logits, dim=1)
+            output[rows, head] = logits.softmax(dim=1) @ torch.cat(parts, dim=0)
+    return output[None], lse[None]
+
+
 def selector_reference(q, descriptors, scale, selector):
     batch, sequence, heads, _ = q.shape
     blocks = descriptors.mean_k.shape[1]
@@ -205,6 +248,41 @@ def main():
     reference, reference_lse = explicit_mean_reference(q, k, v, selected, descriptors, scale)
     compare("fixed_mask_exact_plus_mean_output", combined, reference, records, atol=0.03, rtol=0.03)
     compare("fixed_mask_exact_plus_mean_lse", combined_lse, reference_lse, records, atol=0.025, rtol=0.015)
+
+    # Rescue path: 4 query tiles (the last has one row), unselected history blocks in tiles 2 and 3.
+    rescue_length = 385
+    rescue_q = torch.randn(1, rescue_length, 28, 128, device="cuda", dtype=torch.bfloat16)
+    rescue_k = torch.randn(1, rescue_length, 4, 128, device="cuda", dtype=torch.bfloat16)
+    rescue_v = torch.randn_like(rescue_k)
+    rescue_selected = kernels.protected_selection(
+        torch.zeros(1, 4, 4, 28, device="cuda"), 0.0, 2, 4, 2
+    ).clone()
+    rescue_selected[:, 2, 0, ::2] = False
+    rescue_selected[:, 2, 1, 1::2] = False
+    rescue_selected[:, 3, 1, :] = False
+    rescue_indices, rescue_counts = kernels.indices_from_mask(rescue_selected)
+    for remainder in (False, True):
+        def rescue_path(k_in, v_in):
+            exact, exact_lse = upstream.exact_attention(
+                rescue_q, k_in, v_in, rescue_indices, rescue_counts, scale
+            )
+            tail, tail_lse = kernels.rescue_tail(
+                rescue_q, k_in, v_in, rescue_selected, scale, chunk_tiles=2, remainder=remainder
+            )
+            return kernels.merge_exact_mean(exact, exact_lse, tail, tail_lse)
+
+        name = "rescue_remainder" if remainder else "rescue"
+        actual, actual_lse = rescue_path(rescue_k, rescue_v)
+        expected, expected_lse = explicit_rescue_reference(
+            rescue_q, rescue_k, rescue_v, rescue_selected, scale, remainder
+        )
+        compare(f"fixed_mask_exact_plus_{name}_output", actual, expected, records, atol=0.03, rtol=0.03)
+        compare(f"fixed_mask_exact_plus_{name}_lse", actual_lse, expected_lse, records, atol=0.025, rtol=0.015)
+        future_k, future_v = rescue_k.clone(), rescue_v.clone()
+        future_k[:, 300:] *= 19
+        future_v[:, 300:] += 23
+        changed, _ = rescue_path(future_k, future_v)
+        compare(f"fixed_route_future_kv_{name}", changed[:, :300], actual[:, :300], records, atol=0, rtol=0)
 
     for selector in ("mean_balanced", "cgf_mean", "dispersion_mean"):
         actual = kernels.selector_scores(q, descriptors, scale, selector, chunk_tiles=2)

@@ -1,4 +1,4 @@
-"""Transformers attention backend for dense, V1, and mean-corrected prefill."""
+"""Transformers attention backend for dense, V1, mean-corrected, and rescue prefill."""
 
 import torch
 import torch.nn.functional as F
@@ -19,7 +19,13 @@ METHODS = (
     "mean_balanced",
     "cgf_mean",
     "dispersion_mean",
+    "fp_v1_rescue",
+    "fp_v1_rescue_v2",
 )
+V1_ROUTED_METHODS = {"fp_v1", "mean_native", "fp_v1_rescue", "fp_v1_rescue_v2"}
+# V1 routing unchanged; every unselected full-history block contributes its tile-mean-query
+# argmax token exactly (and, for _v2, the mean of its remaining B-1 tokens).
+RESCUE_METHODS = {"fp_v1_rescue", "fp_v1_rescue_v2"}
 MEAN_METHODS = {
     "mean_native",
     "mean_balanced",
@@ -207,7 +213,7 @@ class AttentionBackend:
             v = value.transpose(1, 2).contiguous()
             scale = float(scaling)
             capture_v1 = self.capture_callback is not None and self.method == "fp_v1"
-            if self.method in {"fp_v1", "mean_native"}:
+            if self.method in V1_ROUTED_METHODS:
                 descriptor_value = v if self.method == "mean_native" else None
                 selection = self._v1_selection(
                     q,
@@ -260,7 +266,7 @@ class AttentionBackend:
             q_tile_size, k_tile_size = upstream.attention_tile_sizes()
             score_k_tile_size = (
                 upstream.score_tile_size()
-                if self.method in {"fp_v1", "mean_native"}
+                if self.method in V1_ROUTED_METHODS
                 else None
             )
             if self.record:
@@ -295,6 +301,32 @@ class AttentionBackend:
                         exact_lse,
                         mean_output,
                         mean_lse,
+                    ),
+                )
+            elif self.method in RESCUE_METHODS:
+                # Timed as the "mean" stage: the non-exact tail path of the profile schema.
+                rescue_output, rescue_lse = self._stage(
+                    record,
+                    "mean",
+                    lambda: kernels.rescue_tail(
+                        q,
+                        k,
+                        v,
+                        selected,
+                        scale,
+                        self.block_size,
+                        self.selector_chunk_tiles,
+                        remainder=self.method == "fp_v1_rescue_v2",
+                    ),
+                )
+                output, _ = self._stage(
+                    record,
+                    "merge",
+                    lambda: kernels.merge_exact_mean(
+                        exact_output,
+                        exact_lse,
+                        rescue_output,
+                        rescue_lse,
                     ),
                 )
             else:
