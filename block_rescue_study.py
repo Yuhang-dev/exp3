@@ -237,7 +237,7 @@ def summarize(out):
     table = pd.concat(frames)
     table.to_csv(out / "summary_methods.csv", index=False)
 
-    diag = pd.read_csv(out / "diagnostics.csv.gz")
+    diag = pd.read_csv(out / "diag.csv.gz")
     sums = diag.groupby(["panel", "layer", "group"])[
         ["blocks", "weight", "g_full", "gap_refined", "argmax_hit", "top1_share"]
     ].sum()
