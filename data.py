@@ -428,7 +428,7 @@ def prepare_ruler(tokenizer, tasks, split, seed, total_budgets, samples, max_new
                     "total_context_budget": total_budget,
                     "prompt_budget": prompt_budget,
                     "actual_tokens": len(token_ids),
-                    "question": str(row["query"] if "query" in row else row["question"]),
+                    "question": str(row["query"] if "query" in row else row.get("question", "")),
                     "answers": answers,
                     "expected_format": prepared["prefix"] + " " + ", ".join(answers),
                     "scorer_prefix": prepared["prefix"],
