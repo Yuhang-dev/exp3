@@ -10,7 +10,7 @@ set -euo pipefail
 cd /root/autodl-tmp/exp3
 source ./env.sh
 
-STAGE="${1:?usage: bash run_rescue_benchmarks.sh {check|ruler13|longbench|bfcl} [N]}"
+STAGE="${1:-}"
 TAG="$(date +%Y%m%d_%H%M%S)"
 CANDIDATES=(--candidate dense --candidate fp_v1:0.08 --candidate fp_v1_rescue:0.08 --candidate fp_v1_rescue_v2:0.08)
 
@@ -76,7 +76,7 @@ case "$STAGE" in
     echo "Done: $OUT"
     ;;
   *)
-    echo "unknown stage: $STAGE" >&2
+    echo "usage: bash run_rescue_benchmarks.sh check|ruler13|longbench|bfcl [N]" >&2
     exit 2
     ;;
 esac
