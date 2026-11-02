@@ -376,8 +376,8 @@ def selection_accounting(
     executed_mean_entries = batch * sequence * heads * blocks if mean_method else 0
     selector_executed_entries = 0
     selector_physical_tiles = None
-    if method in {"mean_balanced", "cgf_mean", "dispersion_mean"}:
-        descriptor_dots = 1 if method == "mean_balanced" else 2
+    if method in {"mean_balanced", "cgf_mean", "dispersion_mean", "fp_row_norm"}:
+        descriptor_dots = 1 if method in {"mean_balanced", "fp_row_norm"} else 2
         selector_executed_entries = batch * sequence * heads * blocks * descriptor_dots
     elif method in {"fp_v1", "mean_native", "fp_v1_rescue", "fp_v1_rescue_v2"} and score_k_tile_size is not None:
         selector_physical_tiles = sum(

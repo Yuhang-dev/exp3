@@ -21,6 +21,7 @@ METHODS = (
     "dispersion_mean",
     "fp_v1_rescue",
     "fp_v1_rescue_v2",
+    "fp_row_norm",
 )
 V1_ROUTED_METHODS = {"fp_v1", "mean_native", "fp_v1_rescue", "fp_v1_rescue_v2"}
 # V1 routing unchanged; every unselected full-history block contributes its tile-mean-query
@@ -131,7 +132,8 @@ class AttentionBackend:
                     q,
                     descriptors,
                     scale,
-                    self.method,
+                    # fp_row_norm: mean_balanced routing with V1's exact-only output.
+                    "mean_balanced" if self.method == "fp_row_norm" else self.method,
                     self.block_size,
                     self.selector_chunk_tiles,
                 ),
