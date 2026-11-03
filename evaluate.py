@@ -22,7 +22,7 @@ from attention import AttentionBackend, METHODS
 from data import RULER_TASKS, input_hash, prepare_inputs
 from scoring import SCORER_VERSION, score_prediction
 from upstream import flashprefill_native_forward as upstream
-from weight_compression import load_model
+from weight_compression import SIMULATED, load_model
 
 
 @dataclass(frozen=True)
@@ -99,7 +99,7 @@ def arguments():
     parser.add_argument("--profile", action="store_true")
     parser.add_argument("--quality-only", action="store_true", help="Skip warmup and timing prefills.")
     parser.add_argument("--selector-chunk-tiles", type=int, default=8)
-    parser.add_argument("--weight-format", choices=("bf16", "int8", "nf4", "nf4sim", "nf4sim_mlp", "rtn4", "rtn3"), default="bf16")
+    parser.add_argument("--weight-format", choices=("bf16", "int8", "nf4", *SIMULATED), default="bf16")
     parser.add_argument("--wanda", choices=("none", "unstructured", "2:4"), default="none")
     parser.add_argument("--calibration", type=Path, default=Path("datasets/c4/c4-validation.00000-of-00008.json.gz"))
     parser.add_argument("--out", type=Path, default=Path("results/quick"))

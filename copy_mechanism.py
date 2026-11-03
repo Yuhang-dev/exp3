@@ -21,7 +21,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache
 from attention import AttentionBackend
 from data import _token_span
 from prepare_copy_tasks import SOURCES
-from weight_compression import CALIBRATION_WINDOWS, decoder_linears, prune_wanda, simulate, text_windows
+from weight_compression import CALIBRATION_WINDOWS, compress, decoder_linears, prune_wanda, simulate, text_windows
 
 
 GROUPS = {
@@ -32,6 +32,7 @@ GROUPS = {
     "attn": lambda name: ".self_attn." in name,
     "mlp": lambda name: ".mlp." in name,
     "attnL0-18": lambda name: ".self_attn." in name and int(name.split(".")[0]) <= 18,
+    "qk": lambda name: ".self_attn.q_proj" in name or ".self_attn.k_proj" in name,
 }
 
 
@@ -55,8 +56,11 @@ def arguments():
         "bf16", "nf4sim:all", "wanda:all",
         *(f"nf4sim:{group}" for group in GROUPS if group != "all"),
         *(f"wanda:{group}" for group in GROUPS if group != "all"),
-    ], help="base:group[@prefill|@decode]; base is bf16, nf4sim, rtn4, wanda or fp_v1 (FlashPrefill prefill, "
-                             "BF16 weights); group may be negated with !")
+    ], help="base:group[@prefill|@decode]; base is bf16, nf4sim, rtn4, wanda, fp_v1 (FlashPrefill prefill, "
+                             "BF16 weights) or fmt=FORMAT (any simulated weight_compression format, used with group "
+                             "all); group may be negated with !")
+    parser.add_argument("--noise-heads", default="", help="comma-separated LxHy heads whose per-token attention is "
+                        "compared with BF16 (score noise on the gold line and the other context lines)")
     return parser.parse_args()
 
 
@@ -99,8 +103,26 @@ def line_spans(sample, tokenizer):
     return spans
 
 
+def noise_stats(logp, base, gold, rest):
+    """Per head: with eta the change of log-attention against BF16 and w the BF16 attention within a region, the
+    region's log-sum-exp change log sum w e^eta, its w-weighted mean and variance of eta, and 1 / sum w^2.
+    delta = rest_lse - gold_lse is the drop of the gold log-odds; rest_lse - rest_mean is the convexity gain."""
+    eta = logp - base
+    stats = {}
+    for name, index in (("gold", gold), ("rest", rest)):
+        w = base[:, index].softmax(-1)
+        e = eta[:, index]
+        mean = (w * e).sum(-1)
+        stats[f"{name}_mean"] = mean
+        stats[f"{name}_var"] = (w * (e - mean[:, None]) ** 2).sum(-1)
+        stats[f"{name}_var_unweighted"] = e.var(-1)
+        stats[f"{name}_lse"] = torch.logsumexp(base[:, index] + e, -1) - torch.logsumexp(base[:, index], -1)
+        stats[f"{name}_neff"] = 1 / (w ** 2).sum(-1)
+    return {f"noise_{key}": value.tolist() for key, value in stats.items()}
+
+
 @torch.no_grad()
-def probe(model, sample, answer_ids, targets, spans, reference, switch=None):
+def probe(model, sample, answer_ids, targets, spans, reference, switch=None, heads=()):
     prompt = torch.tensor([sample["input_ids"]], device="cuda")
     cache = DynamicCache()
     torch.compiler.cudagraph_mark_step_begin()
@@ -148,7 +170,7 @@ def probe(model, sample, answer_ids, targets, spans, reference, switch=None):
         local = line - max(0, line - NEIGHBOURS)
         others = torch.cat([mass[..., :local], mass[..., local + 1:]], dim=-1)
         context = weights[HEAD_LAYERS:, :, spans[0][0]:spans[-1][1]].sum(-1)
-        rows.append({
+        row = {
             "sample_id": sample["sample_id"], "source": sample["variant"], "key": target["key"],
             "rival_offset": offset, "shared_chars": target["shared_chars"],
             "divergence_margin": margin[division].item(), "divergence_gold_logprob": logprobs[division, gold[division]].item(),
@@ -166,7 +188,15 @@ def probe(model, sample, answer_ids, targets, spans, reference, switch=None):
             "attended_offset": (mass.mean(1).argmax(-1) - local).tolist(),
             "gold_head_mass": mass[HEAD_LAYERS:, :, local].tolist(), "context_head_mass": context.tolist(),
             "context_tokens": spans[-1][1] - spans[0][0], "gold_tokens": spans[line][1] - spans[line][0],
-        })
+        }
+        if heads:
+            logp = torch.stack([weights[layer, head] for layer, head in heads]).clamp_min(1e-30).log().cpu()
+            base = reference.setdefault("logp", {}).setdefault(target["key"], logp)
+            rest = torch.cat([torch.arange(spans[0][0], spans[line][0]), torch.arange(spans[line][1], spans[-1][1])])
+            row.update(noise_stats(logp, base, torch.arange(*spans[line]), rest))
+            row["line_profile"] = torch.stack([mass[layer, head] for layer, head in heads]).tolist()
+            row["profile_center"] = local
+        rows.append(row)
     return rows, reference
 
 
@@ -177,6 +207,8 @@ def kl(reference, logprobs):
 
 def main():
     args = arguments()
+    heads = [tuple(map(int, re.fullmatch(r"L(\d+)H(\d+)", name).groups())) for name in args.noise_heads.split(",")
+             if name]
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     samples = [s for path in args.inputs for s in torch.load(path, weights_only=False)
                if re.fullmatch(args.samples, s["sample_id"])]
@@ -200,6 +232,14 @@ def main():
         for condition in args.conditions:
             spec, _, phase = condition.partition("@")
             base, _, group = spec.partition(":")
+            if base.startswith("fmt=") and base not in weights:
+                for other in [key for key in weights if key.startswith("fmt=")]:
+                    del weights[other]
+                with torch.no_grad():
+                    for name, module in linears.items():
+                        module.weight.copy_(weights["bf16"][name])
+                compress(model, base[4:])
+                weights[base] = {name: module.weight.detach().cpu() for name, module in linears.items()}
             if backend:
                 backend.configure("fp_v1" if base == "fp_v1" else "dense", FP_ALPHA)
             chosen = {name: weights[base if base in weights and base != "bf16" and selected(group, name) else "bf16"][name]
@@ -217,7 +257,7 @@ def main():
                 if phase == "prefill":
                     swap()
                 rows, reference = probe(model, sample, answer_ids, targets, spans, references.get(sample["sample_id"]),
-                                        swap if phase else None)
+                                        swap if phase else None, heads)
                 if phase == "decode":
                     swap()
                 references.setdefault(sample["sample_id"], reference)

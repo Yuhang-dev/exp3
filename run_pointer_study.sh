@@ -5,7 +5,7 @@
 # Batch 2 stages: batch2_data, temperature, competitors, weights, batch2_summary.
 # Batch 3 stages: batch3_data, batch3, batch3_summary.
 # Batch 4 stages: mechanism, batch4_data, batch4, batch4_summary, mechanism_phase, repair.
-# Batch 5 stages: predecode, rtn4_mechanism, gap, holdout_gap.
+# Batch 5 stages: predecode, rtn4_mechanism, gap, holdout_gap, noise, repair_free, noise_sources, budget.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 source ./env.sh
@@ -311,6 +311,44 @@ holdout_gap() {
   python -u summarize_gap.py "$ROOT/holdout_gap" L23H11,L22H4,L22H7,L22H3,L22H1,L23H12,L22H25,L21H25
 }
 
+noise() {
+  local heads=L23H11,L22H4,L22H7,L22H3,L22H1,L23H12,L22H25,L21H25
+  python -u copy_mechanism.py --inputs "$ROOT/batch4_inputs/length.pt" "$ROOT/batch3_inputs/copy.pt"     --samples 'len8k-hdfs-([0-9]|1[0-6])|len16k-hdfs-([0-9]|1[0-6])|copy-hdfs-([0-9]|1[0-5])' --out "$ROOT/noise"     --conditions bf16 nf4sim:all nf4sim:!attn nf4sim:!qk rtn4:all wanda:all fp_v1:all --noise-heads "$heads"     2>&1 | tee "$ROOT/noise.log"
+  python -u summarize_noise.py "$ROOT/noise" "$heads"
+}
+
+repair_free() {
+  local spec
+  for spec in nf4sim:none nf4sim_mlp:none nf4sim_noqk:none rtn4:none rtn4_mlp:none; do
+    copy_eval "$ROOT/batch4_inputs/length.pt" "$ROOT/batch4_length" "$spec"
+  done
+  for spec in nf4sim_noqk:none rtn4_mlp:none; do
+    copy_eval "$ROOT/batch4_inputs/formats.pt" "$ROOT/batch4_formats" "$spec"
+  done
+  for spec in nf4sim_noqk rtn4_mlp; do
+    python -u measure_ppl.py --weight-format "$spec" --calibration datasets/c4/c4-validation.00000-of-00008.json.gz       --out "$ROOT/ppl/${spec}_none.json"
+  done
+  python -u summarize_repair.py "$ROOT"
+}
+
+noise_sources() {
+  local heads=L23H11,L22H4,L22H7,L22H3,L22H1,L23H12,L22H25,L21H25
+  python -u copy_mechanism.py --inputs "$ROOT/batch4_inputs/length.pt" "$ROOT/batch3_inputs/copy.pt"     --samples 'len8k-hdfs-([0-9]|1[0-6])|len16k-hdfs-([0-9]|1[0-6])|copy-hdfs-([0-9]|1[0-5])' --out "$ROOT/noise_sources"     --conditions bf16 rtn4:all rtn4:mlp rtn4:attn rtn4:!qk rtn4:L0-9 rtn4:L10-18 rtn4:L19-27 nf4sim:mlp nf4sim:attn     --noise-heads "$heads" 2>&1 | tee "$ROOT/noise_sources.log"
+  python -u summarize_noise.py "$ROOT/noise_sources" "$heads"
+}
+
+budget() {
+  local heads=L23H11,L22H4,L22H7,L22H3,L22H1,L23H12,L22H25,L21H25 spec
+  for spec in nf4sim_mlp03 nf4sim_rand nf4sim_err rtn5 rtn6; do
+    python -u measure_ppl.py --weight-format "$spec" --calibration datasets/c4/c4-validation.00000-of-00008.json.gz       --out "$ROOT/ppl/${spec}_none.json"
+    copy_eval "$ROOT/batch4_inputs/length.pt" "$ROOT/batch4_length" "$spec:none"
+    copy_eval "$ROOT/batch4_inputs/formats.pt" "$ROOT/batch4_formats" "$spec:none"
+  done
+  python -u copy_mechanism.py --inputs "$ROOT/batch4_inputs/length.pt" "$ROOT/batch3_inputs/copy.pt"     --samples 'len8k-hdfs-([0-9]|1[0-6])|len16k-hdfs-([0-9]|1[0-6])|copy-hdfs-([0-9]|1[0-5])' --out "$ROOT/noise_budget"     --conditions bf16 fmt=nf4sim_mlp03:all fmt=nf4sim_rand:all fmt=nf4sim_err:all fmt=rtn5:all fmt=rtn6:all     --noise-heads "$heads" 2>&1 | tee "$ROOT/noise_budget.log"
+  python -u summarize_noise.py "$ROOT/noise_budget" "$heads"
+  python -u summarize_repair.py "$ROOT"
+}
+
 summary() {
   python -u summarize_pointer_study.py "$ROOT"
   tar --exclude='*.pt' -czf "$ROOT.tar.gz" -C "$(dirname "$ROOT")" "$(basename "$ROOT")"
@@ -318,7 +356,7 @@ summary() {
 }
 
 case "${1:-}" in
-  check|prepare|smoke|alpha|length|patch|factors|holdout|summary|followup_data|margin|quant|small|followup_summary|batch2_data|temperature|competitors|weights|batch2_summary|batch3_data|batch3|batch3_summary|mechanism|batch4_data|batch4|batch4_summary|mechanism_phase|repair|predecode|rtn4_mechanism|gap|holdout_gap) "$1" ;;
+  check|prepare|smoke|alpha|length|patch|factors|holdout|summary|followup_data|margin|quant|small|followup_summary|batch2_data|temperature|competitors|weights|batch2_summary|batch3_data|batch3|batch3_summary|mechanism|batch4_data|batch4|batch4_summary|mechanism_phase|repair|predecode|rtn4_mechanism|gap|holdout_gap|noise|repair_free|noise_sources|budget) "$1" ;;
   all) check; prepare; smoke; alpha; patch; length; factors; holdout; summary ;;
   *) echo "usage: bash run_pointer_study.sh {check|prepare|smoke|alpha|length|patch|factors|holdout|summary|all}" >&2; exit 2 ;;
 esac

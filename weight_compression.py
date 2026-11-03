@@ -3,8 +3,11 @@
 for 2:4), with 128 C4-validation windows of 2048 tokens as calibration and the next 32 for perplexity.
 Simulated formats keep BF16 storage so single modules can be restored: nf4sim quantizes and dequantizes each
 decoder Linear with bitsandbytes NF4 (blocksize 64, as BitsAndBytesConfig loads it); rtn4 / rtn3 round each
-group of 128 input weights to 4 / 3 bits with an asymmetric min-max grid. nf4sim_mlp quantizes only the MLP
-Linears and keeps attention projections in BF16."""
+group of 128 input weights to 6 / 5 / 4 / 3 bits with an asymmetric min-max grid. A suffix keeps part of each
+layer in BF16: _mlp quantizes only the MLP Linears (attention projections stay BF16), _noqk keeps q_proj and
+k_proj. Equal-budget controls keep as many parameters as the attention projections (12.6% of the decoder Linears
+of Qwen2.5-7B): _mlp03 keeps the MLPs of layers 0-3, _rand a random 12.6% of the output rows of every Linear,
+_err the rows with the largest mean squared quantization error across all Linears."""
 
 import gzip
 import json
@@ -74,7 +77,11 @@ def prune_wanda(model, windows, mode):
         ]
 
 
-SIMULATED = ("nf4sim", "nf4sim_mlp", "rtn4", "rtn3")
+SIMULATED = ("nf4sim", "nf4sim_mlp", "nf4sim_noqk", "nf4sim_mlp03", "nf4sim_rand", "nf4sim_err",
+             "rtn6", "rtn5", "rtn4", "rtn4_mlp", "rtn4_noqk", "rtn3")
+KEPT = {"mlp": lambda name: ".self_attn." in name, "noqk": lambda name: ".q_proj" in name or ".k_proj" in name,
+        "mlp03": lambda name: ".mlp." in name and int(name.split(".")[0]) <= 3}
+ROW_SHARE = 0.126
 
 
 def decoder_linears(model):
@@ -83,10 +90,11 @@ def decoder_linears(model):
 
 @torch.no_grad()
 def simulate(weight, weight_format):
-    if weight_format.startswith("nf4sim"):
+    base = weight_format.split("_")[0]
+    if base == "nf4sim":
         packed, state = bnb.quantize_4bit(weight, blocksize=64, quant_type="nf4")
         return bnb.dequantize_4bit(packed, state, blocksize=64, quant_type="nf4").to(weight.dtype)
-    bits = int(weight_format[-1])
+    bits = int(base[-1])
     groups = weight.float().view(weight.shape[0], -1, 128)
     low, high = groups.amin(dim=2, keepdim=True), groups.amax(dim=2, keepdim=True)
     scale = (high - low).clamp_min(1e-8) / (2**bits - 1)
@@ -113,10 +121,33 @@ def load_model(name, weight_format="bf16", wanda="none", calibration=None):
         tokenizer = AutoTokenizer.from_pretrained(name)
         prune_wanda(model, text_windows(tokenizer, calibration, CALIBRATION_WINDOWS), wanda)
     if weight_format in SIMULATED:
-        for name, module in decoder_linears(model).items():
-            if weight_format != "nf4sim_mlp" or ".mlp." in name:
-                module.weight.copy_(simulate(module.weight, weight_format))
+        compress(model, weight_format)
     return model
+
+
+@torch.no_grad()
+def compress(model, weight_format):
+    """Replace the decoder Linear weights in place by their simulated quantization, keeping the suffix's share."""
+    kept = weight_format.partition("_")[2]
+    linears = decoder_linears(model)
+    if kept == "err":
+        errors = {name: (simulate(module.weight, weight_format).float() - module.weight.float()).square().mean(1).cpu()
+                  for name, module in linears.items()}
+        flat = torch.cat(list(errors.values()))
+        sizes = torch.cat([torch.full_like(errors[name], module.in_features) for name, module in linears.items()])
+        order = flat.argsort(descending=True)
+        threshold = flat[order[(sizes[order].cumsum(0) <= ROW_SHARE * sizes.sum()).sum()]]
+    generator = torch.Generator().manual_seed(0)
+    for name, module in linears.items():
+        if kept in KEPT and KEPT[kept](name):
+            continue
+        quantized = simulate(module.weight, weight_format)
+        rows = {"rand": lambda: torch.rand(module.out_features, generator=generator) < ROW_SHARE,
+                "err": lambda: errors[name] > threshold}.get(kept)
+        if rows:
+            keep = rows().cuda()
+            quantized[keep] = module.weight[keep]
+        module.weight.copy_(quantized)
 
 
 @torch.no_grad()
