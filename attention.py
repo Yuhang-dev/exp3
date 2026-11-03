@@ -191,11 +191,16 @@ class AttentionBackend:
             factor = 1 + self.alpha * torch.log(keys_seen / TEMPERATURE_BASE).clamp_min(0)
             query = query * factor.view(1, 1, -1, 1).to(query.dtype)
         if self.method == "dense" or self.method in TEMPERATURE_METHODS or not is_prefill:
+            # A multi-token chunk after a cache must be causal against the cache's end, not its start.
+            offset = key.shape[2] - query.shape[2]
+            chunk_mask = None if is_prefill or query.shape[2] == 1 else (
+                torch.arange(key.shape[2], device=query.device)[None]
+                <= offset + torch.arange(query.shape[2], device=query.device)[:, None])
             output = F.scaled_dot_product_attention(
                 query,
                 key,
                 value,
-                attn_mask=None,
+                attn_mask=chunk_mask,
                 dropout_p=0.0,
                 is_causal=is_prefill,
                 scale=scaling,

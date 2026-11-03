@@ -18,6 +18,7 @@ import re
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache
 
+from attention import AttentionBackend
 from data import _token_span
 from prepare_copy_tasks import SOURCES
 from weight_compression import CALIBRATION_WINDOWS, decoder_linears, prune_wanda, simulate, text_windows
@@ -39,11 +40,13 @@ def selected(group, name):
     return not GROUPS[group[1:]](name) if group.startswith("!") else GROUPS[group](name)
 NEIGHBOURS = 10
 TOP = 20
+FP_ALPHA = 0.08  # fp_v1 sparsifies the prompt encoding only; later chunks have fewer queries than keys and stay dense
+HEAD_LAYERS = 14  # per-head gold and context mass are stored from this layer on
 
 
 def arguments():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--inputs", type=Path, required=True)
+    parser.add_argument("--inputs", type=Path, nargs="+", required=True)
     parser.add_argument("--samples", required=True, help="regular expression the sample_id must fully match")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct")
@@ -52,7 +55,8 @@ def arguments():
         "bf16", "nf4sim:all", "wanda:all",
         *(f"nf4sim:{group}" for group in GROUPS if group != "all"),
         *(f"wanda:{group}" for group in GROUPS if group != "all"),
-    ], help="base:group[@prefill|@decode]; base is bf16, nf4sim, rtn4 or wanda; group may be negated with !")
+    ], help="base:group[@prefill|@decode]; base is bf16, nf4sim, rtn4, wanda or fp_v1 (FlashPrefill prefill, "
+                             "BF16 weights); group may be negated with !")
     return parser.parse_args()
 
 
@@ -99,6 +103,7 @@ def line_spans(sample, tokenizer):
 def probe(model, sample, answer_ids, targets, spans, reference, switch=None):
     prompt = torch.tensor([sample["input_ids"]], device="cuda")
     cache = DynamicCache()
+    torch.compiler.cudagraph_mark_step_begin()
     output = model.model(input_ids=prompt, past_key_values=cache, use_cache=True)
     context = model.lm_head(output.last_hidden_state[0, -700:-200]).float().log_softmax(-1)
     context_gold = torch.tensor(sample["input_ids"][-699:-199], device="cuda")
@@ -142,6 +147,7 @@ def probe(model, sample, answer_ids, targets, spans, reference, switch=None):
                             range(max(0, line - NEIGHBOURS), min(len(spans), line + NEIGHBOURS + 1))], dim=-1)
         local = line - max(0, line - NEIGHBOURS)
         others = torch.cat([mass[..., :local], mass[..., local + 1:]], dim=-1)
+        context = weights[HEAD_LAYERS:, :, spans[0][0]:spans[-1][1]].sum(-1)
         rows.append({
             "sample_id": sample["sample_id"], "source": sample["variant"], "key": target["key"],
             "rival_offset": offset, "shared_chars": target["shared_chars"],
@@ -158,6 +164,8 @@ def probe(model, sample, answer_ids, targets, spans, reference, switch=None):
             "gold_line_head_max": mass[..., local].amax(1).tolist(),
             "rival_line_head_max": mass[..., local + offset].amax(1).tolist(),
             "attended_offset": (mass.mean(1).argmax(-1) - local).tolist(),
+            "gold_head_mass": mass[HEAD_LAYERS:, :, local].tolist(), "context_head_mass": context.tolist(),
+            "context_tokens": spans[-1][1] - spans[0][0], "gold_tokens": spans[line][1] - spans[line][0],
         })
     return rows, reference
 
@@ -170,10 +178,11 @@ def kl(reference, logprobs):
 def main():
     args = arguments()
     tokenizer = AutoTokenizer.from_pretrained(args.model)
-    samples = [s for s in torch.load(args.inputs, weights_only=False)
+    samples = [s for path in args.inputs for s in torch.load(path, weights_only=False)
                if re.fullmatch(args.samples, s["sample_id"])]
     prepared = [(sample, *targets_of(sample, tokenizer), line_spans(sample, tokenizer)) for sample in samples]
     print("prompts", len(prepared), flush=True)
+    backend = AttentionBackend() if any(condition.startswith("fp_v1") for condition in args.conditions) else None
     model = AutoModelForCausalLM.from_pretrained(
         args.model, torch_dtype=torch.bfloat16, attn_implementation="sdpa", device_map="cuda").eval()
     model.requires_grad_(False)
@@ -191,7 +200,10 @@ def main():
         for condition in args.conditions:
             spec, _, phase = condition.partition("@")
             base, _, group = spec.partition(":")
-            chosen = {name: weights[base if base != "bf16" and selected(group, name) else "bf16"][name] for name in linears}
+            if backend:
+                backend.configure("fp_v1" if base == "fp_v1" else "dense", FP_ALPHA)
+            chosen = {name: weights[base if base in weights and base != "bf16" and selected(group, name) else "bf16"][name]
+                      for name in linears}
             with torch.no_grad():
                 for name, module in linears.items():
                     module.weight.copy_(weights["bf16"][name] if phase else chosen[name])

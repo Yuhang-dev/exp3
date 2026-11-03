@@ -5,7 +5,7 @@
 # Batch 2 stages: batch2_data, temperature, competitors, weights, batch2_summary.
 # Batch 3 stages: batch3_data, batch3, batch3_summary.
 # Batch 4 stages: mechanism, batch4_data, batch4, batch4_summary, mechanism_phase, repair.
-# Batch 5 stages: predecode, rtn4_mechanism.
+# Batch 5 stages: predecode, rtn4_mechanism, gap, holdout_gap.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 source ./env.sh
@@ -301,6 +301,16 @@ rtn4_mechanism() {
   python -u summarize_predecode.py "$ROOT"
 }
 
+gap() {
+  python -u copy_mechanism.py --inputs "$ROOT/batch4_inputs/length.pt" "$ROOT/batch3_inputs/copy.pt"     --samples 'len8k-hdfs-([0-9]|1[0-6])|len16k-hdfs-([0-9]|1[0-6])|copy-hdfs-([0-9]|1[0-5])' --out "$ROOT/gap"     --conditions bf16 nf4sim:all rtn4:all wanda:all 2>&1 | tee "$ROOT/gap.log"
+  python -u summarize_gap.py "$ROOT/gap"
+}
+
+holdout_gap() {
+  python -u copy_mechanism.py --inputs "$ROOT/batch4_inputs/length.pt" "$ROOT/batch3_inputs/copy.pt"     "$ROOT/batch4_inputs/path_first.pt"     --samples 'len8k-hdfs-(1[7-9]|2[0-4])|len16k-hdfs-(1[7-9]|2[0-4])|copy-hdfs-(1[6-9]|2[0-4])|copy-manifest_pf-([0-9]|1[0-9]|2[0-4])'     --out "$ROOT/holdout_gap" --conditions bf16 nf4sim:all rtn4:all wanda:all fp_v1:all 2>&1 | tee "$ROOT/holdout_gap.log"
+  python -u summarize_gap.py "$ROOT/holdout_gap" L23H11,L22H4,L22H7,L22H3,L22H1,L23H12,L22H25,L21H25
+}
+
 summary() {
   python -u summarize_pointer_study.py "$ROOT"
   tar --exclude='*.pt' -czf "$ROOT.tar.gz" -C "$(dirname "$ROOT")" "$(basename "$ROOT")"
@@ -308,7 +318,7 @@ summary() {
 }
 
 case "${1:-}" in
-  check|prepare|smoke|alpha|length|patch|factors|holdout|summary|followup_data|margin|quant|small|followup_summary|batch2_data|temperature|competitors|weights|batch2_summary|batch3_data|batch3|batch3_summary|mechanism|batch4_data|batch4|batch4_summary|mechanism_phase|repair|predecode|rtn4_mechanism) "$1" ;;
+  check|prepare|smoke|alpha|length|patch|factors|holdout|summary|followup_data|margin|quant|small|followup_summary|batch2_data|temperature|competitors|weights|batch2_summary|batch3_data|batch3|batch3_summary|mechanism|batch4_data|batch4|batch4_summary|mechanism_phase|repair|predecode|rtn4_mechanism|gap|holdout_gap) "$1" ;;
   all) check; prepare; smoke; alpha; patch; length; factors; holdout; summary ;;
   *) echo "usage: bash run_pointer_study.sh {check|prepare|smoke|alpha|length|patch|factors|holdout|summary|all}" >&2; exit 2 ;;
 esac
