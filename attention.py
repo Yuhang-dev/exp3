@@ -22,7 +22,13 @@ METHODS = (
     "fp_v1_rescue",
     "fp_v1_rescue_v2",
     "fp_row_norm",
+    "dense_temp_all",
+    "dense_temp_decode",
 )
+# Dense attention with query rows scaled by 1 + alpha * max(0, ln(n / TEMPERATURE_BASE)), n the number of
+# keys the row sees; alpha is the gamma of this sharpening. _all also scales prefill, _decode only decode.
+TEMPERATURE_METHODS = {"dense_temp_all", "dense_temp_decode"}
+TEMPERATURE_BASE = 4096
 V1_ROUTED_METHODS = {"fp_v1", "mean_native", "fp_v1_rescue", "fp_v1_rescue_v2"}
 # V1 routing unchanged; every unselected full-history block contributes its tile-mean-query
 # argmax token exactly (and, for _v2, the mean of its remaining B-1 tokens).
@@ -178,7 +184,13 @@ class AttentionBackend:
             overall_start.record()
 
         is_prefill = query.shape[2] == key.shape[2]
-        if self.method == "dense" or not is_prefill:
+        if self.method == "dense_temp_all" or (self.method == "dense_temp_decode" and not is_prefill):
+            keys_seen = torch.arange(
+                key.shape[2] - query.shape[2] + 1, key.shape[2] + 1, device=query.device, dtype=torch.float32
+            )
+            factor = 1 + self.alpha * torch.log(keys_seen / TEMPERATURE_BASE).clamp_min(0)
+            query = query * factor.view(1, 1, -1, 1).to(query.dtype)
+        if self.method == "dense" or self.method in TEMPERATURE_METHODS or not is_prefill:
             output = F.scaled_dot_product_attention(
                 query,
                 key,

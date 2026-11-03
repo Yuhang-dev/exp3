@@ -4,8 +4,7 @@ Each factor separates one explanation of the sparse copying failures:
 filler_index_7   does the index collapse follow the filler prior (0 -> 7)?
 filler_other_ns  does the failure need fillers sharing the target namespace?
 order_cyclic     does the collapse follow the first emitted line rather than the filler prior?
-position_swap    index or position: key 0 at 86% and key 2 at 8%.
-shift_K          same content, every needle moved K tokens against the block grid.
+shift_K         same content, every needle moved K tokens against the block grid.
 """
 
 import argparse
@@ -24,7 +23,7 @@ def arguments():
     parser.add_argument("--inputs", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct")
-    parser.add_argument("--shifts", type=int, nargs="+", default=[16, 32, 48, 64, 80, 96, 112])
+    parser.add_argument("--shifts", type=int, nargs="+", default=[32, 64])
     return parser.parse_args()
 
 
@@ -86,13 +85,6 @@ def order_cyclic(base, tokenizer, rendered):
     return from_text(base, tokenizer, "order_cyclic", changed, question)
 
 
-def position_swap(base, tokenizer, rendered):
-    first = base["evidence_positions"][0]["record"]
-    last = base["evidence_positions"][2]["record"]
-    changed = rendered.replace(first, "\0").replace(last, first).replace("\0", last)
-    return from_text(base, tokenizer, "position_swap", changed)
-
-
 def shifted(base, tokenizer, rendered, shift):
     encoded = tokenizer(rendered, add_special_tokens=False, return_offsets_mapping=True)
     assert encoded["input_ids"] == list(base["input_ids"])
@@ -117,7 +109,7 @@ def main():
     for base in inputs:
         rendered = tokenizer.decode(base["input_ids"], skip_special_tokens=False)
         output.append(finish(base, "baseline", list(base["input_ids"]), base["evidence_positions"], base["question"]))
-        for build in (filler_index_7, filler_other_ns, order_cyclic, position_swap):
+        for build in (filler_index_7, filler_other_ns, order_cyclic):
             output.append(build(base, tokenizer, rendered))
         output.extend(shifted(base, tokenizer, rendered, shift) for shift in args.shifts)
     args.out.parent.mkdir(parents=True, exist_ok=True)

@@ -22,6 +22,7 @@ from attention import AttentionBackend, METHODS
 from data import RULER_TASKS, input_hash, prepare_inputs
 from scoring import SCORER_VERSION, score_prediction
 from upstream import flashprefill_native_forward as upstream
+from weight_compression import load_model
 
 
 @dataclass(frozen=True)
@@ -96,7 +97,11 @@ def arguments():
         help="Resume an interrupted run whose saved generations are an exact sample prefix.",
     )
     parser.add_argument("--profile", action="store_true")
+    parser.add_argument("--quality-only", action="store_true", help="Skip warmup and timing prefills.")
     parser.add_argument("--selector-chunk-tiles", type=int, default=8)
+    parser.add_argument("--weight-format", choices=("bf16", "int8", "nf4", "nf4sim", "nf4sim_mlp", "rtn4", "rtn3"), default="bf16")
+    parser.add_argument("--wanda", choices=("none", "unstructured", "2:4"), default="none")
+    parser.add_argument("--calibration", type=Path, default=Path("datasets/c4/c4-validation.00000-of-00008.json.gz"))
     parser.add_argument("--out", type=Path, default=Path("results/quick"))
     return parser.parse_args()
 
@@ -608,13 +613,7 @@ def run(args, candidates, inputs, metadata, resume_attempt_dir=None):
     write_metadata(args.out / "metadata.json", metadata)
 
     backend = AttentionBackend(alpha=args.alpha, selector_chunk_tiles=args.selector_chunk_tiles)
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model,
-        torch_dtype=torch.bfloat16,
-        attn_implementation="sdpa",
-        device_map="cuda",
-    ).eval()
-    model.requires_grad_(False)
+    model = load_model(args.model, args.weight_format, args.wanda, args.calibration)
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     metadata["model_commit"] = model.config._commit_hash
     metadata["model_config"] = model.config.to_dict()
@@ -633,7 +632,7 @@ def run(args, candidates, inputs, metadata, resume_attempt_dir=None):
             key = sample_key(sample)
             for candidate in candidates:
                 warm_key = (candidate.config_id, sample["actual_tokens"])
-                if warm_key not in warmed:
+                if warm_key not in warmed and not args.quality_only:
                     backend.configure(candidate.method, candidate.alpha)
                     print(
                         f"Warmup {candidate.config_id} n={sample['actual_tokens']}: "
@@ -643,7 +642,7 @@ def run(args, candidates, inputs, metadata, resume_attempt_dir=None):
                     prefill(model, input_ids, measure=False)
                     warmed.add(warm_key)
 
-            for repeat in range(args.repeats):
+            for repeat in range(0 if args.quality_only else args.repeats):
                 for candidate in rotate(candidates, repeat + sample_number):
                     backend.configure(candidate.method, candidate.alpha)
                     metrics = prefill(model, input_ids, measure=True)

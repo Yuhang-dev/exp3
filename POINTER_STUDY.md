@@ -16,8 +16,8 @@
 | `alpha` | V1 的 α=0–0.16、`fp_row_norm`、`mean_native`、`mean_balanced` | α=0 未达 100% 或 K/V 明显偏离 dense → 实现问题优先；随 α 单调上升 → 路由问题 |
 | `patch` | 18 个 K/V 组合 + 4 个方法基线，每个都做自由生成和 teacher-forced margin | 见下表 |
 | `length` | 8K/16K/24K/32K | 定位 16K 到 32K 的断崖 |
-| `factors` | 12 个 level × 8 prompt，dense 与 V1 | 见下表 |
-| `holdout` | 32 个新 prompt，配置已冻结为 α=0.08 | 校准集上的结论能否推广；只跑一次 |
+| `factors` | 6 个 level × 8 prompt（共 48 条），dense 与 V1 | 见下表 |
+| `holdout` | 50 个新 prompt，配置已冻结为 α=0.08 | 校准集上的结论能否推广；只跑一次 |
 
 `fp_row_norm` 是新方法：`mean_balanced` 的逐行归一化路由，加 V1 的纯精确输出，与现有方法构成路由 × 尾项 2×2 消融。
 
@@ -43,10 +43,19 @@
 | `filler_index_7` | 干扰项 index 首位 0→7 | 错 index 变成 7 → 被干扰项多数模式带偏；仍是 0 → 另有原因 |
 | `order_cyclic` | 输出顺序改为 1、2、0 | 错 index 变成 1 → 抄第一行；仍是 0 → 不是抄第一行 |
 | `filler_other_ns` | 干扰项换 namespace | 恢复 → 需要共享前缀才会失败 |
-| `position_swap` | key0 放 86%，key2 放 8% | 区分 index 效应和位置效应 |
-| `shift_16…112` | 同一内容相对块网格平移 | 同一 needle 靠近边界才失败 → 块边界线索成立 |
+| `shift_32`、`shift_64` | 同一内容相对块网格平移 | 同一 needle 靠近边界才失败 → 块边界线索成立 |
 
 块边界的阈值（偏移 ≤21 或 ≥120）是在归档数据上事后发现的，这里用新平移数据做检验。`filler_other_ns` 的 tokenization 会变化，个别 prompt 最长到 34417 token（约 +5%）；变长只会让任务更难，所以恢复仍可解读，不恢复时要看长度。
+
+## 后续三个判别实验
+
+| 阶段 | 内容 | 判读 |
+| --- | --- | --- |
+| `margin` | 50 条：RULER（MK1/2/3、MQ 各 5 条）、LongBench v2（15 条）、真实 HDFS 日志抄写（15 条）；dense、`fp_v1` α=0.01 和 0.08、`fp_row_norm` α=0.08 | 输出与 dense 逐 token 相同的 prompt 上，V1 的最小 margin 系统性更低且随 α 增大而加重 → 隐藏的脆弱性成立 |
+| `quant` | `holdout` 50 条；dense prefill 后量化 K/V（4、3、2、1 bit），K 按通道、V 按 token，最近 256 个 token 不量化 | 错误同样是抄错来源 → 不是 FlashPrefill 独有 |
+| `small` | `holdout` 50 条；Qwen2.5-0.5B、1.5B 的 dense | dense 的错法与 V1 相同 → 问题可能是长上下文抄写本身 |
+
+量化是 KIVI 风格的简化实现，用于考察现象，不等同于任何已发表方法的结果。只比较输出完全相同的 prompt，是为了避免以 dense 的 argmax 路径作参考时偏向 dense。
 
 ## 运行
 
